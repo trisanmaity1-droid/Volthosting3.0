@@ -7,3 +7,4 @@ users/
 backups/
 *.log
 .env
+*.backup
