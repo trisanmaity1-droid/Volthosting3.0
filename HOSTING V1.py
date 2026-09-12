@@ -63,7 +63,8 @@ BRAND_VER = "V12.09.000"
 STUDIO = "VOLT ⚡ STUDIO"
 FOOTER = f"\n© 2026 {STUDIO}\nAll Rights Reserved."
 
-# Database — never delete/replace existing user data during startup.\n_DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+# Database — never delete/replace existing user data during startup.
+_DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 _RAILWAY_VOLUME = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
 if _DATABASE_URL:
     DB_PATH = _DATABASE_URL
@@ -121,7 +122,7 @@ _DB_WRITE_LOCK = threading.RLock()
 _DB_RETRY_DELAYS = (0.02, 0.05, 0.1, 0.2, 0.4, 0.8, 1.2)
 
 class _RetryingCursor(sqlite3.Cursor):
-    _WRITE_SQL = ("INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP", "ALTER", "PRAGMA")
+    _WRITE_SQL = ("INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP", "ALTER")
 
     def _is_write(self, sql):
         return str(sql).lstrip().upper().startswith(self._WRITE_SQL)
@@ -218,12 +219,46 @@ def get_db():
     conn.execute("PRAGMA cache_size = -32000")
     return conn
 
+def _backup_sqlite_database():
+    """Create a non-destructive SQLite backup before startup schema work."""
+    try:
+        if DB_PATH == ":memory:":
+            return
+        db_file = Path(DB_PATH)
+        if not db_file.exists() or db_file.stat().st_size == 0:
+            return
+        backup_dir = db_file.parent / "db_backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+        backup_path = backup_dir / f"volthosting_{stamp}.db"
+        src_conn = sqlite3.connect(str(db_file), timeout=8)
+        dst_conn = sqlite3.connect(str(backup_path), timeout=8)
+        try:
+            src_conn.backup(dst_conn)
+            dst_conn.commit()
+        finally:
+            dst_conn.close()
+            src_conn.close()
+        backups = sorted(backup_dir.glob("volthosting_*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for old in backups[5:]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+        logger.info("SQLite safety backup created: %s", backup_path)
+    except Exception as exc:
+        logger.warning("SQLite startup backup skipped: %s", exc)
+
 def init_db():
+    _backup_sqlite_database()
     conn = get_db()
     c = conn.cursor()
     # Configure WAL once at startup; never toggle journal mode per request.
-    c.execute("PRAGMA journal_mode = WAL")
-    c.execute("PRAGMA synchronous = NORMAL")
+    try:
+        c.execute("PRAGMA journal_mode = WAL")
+        c.execute("PRAGMA synchronous = NORMAL")
+    except sqlite3.OperationalError as exc:
+        logger.warning("SQLite WAL setup skipped: %s", exc)
     c.executescript('''
         PRAGMA foreign_keys = ON;
         CREATE TABLE IF NOT EXISTS users (
@@ -3274,17 +3309,21 @@ def pay_other(message):
 #  GRACEFUL SHUTDOWN
 # ==========================
 def shutdown(signum=None, frame=None):
-    logger.info("Shutting down...")
-    # Stop all managed processes? We'll let them be; they will be reaped on restart.
-    # We could also stop all hosting processes, but for production we may want to keep them running.
-    # For simplicity, we just exit.
+    logger.info("Graceful shutdown requested (signal=%s). Preserving database and files.", signum)
+    try:
+        conn = get_db()
+        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        conn.close()
+    except Exception as exc:
+        logger.warning("Shutdown SQLite checkpoint skipped: %s", exc)
     sys.exit(0)
 
 # ==========================
 #  MAIN
 # ==========================
 def main():
-    # Initialize DB
+    # Initialize DB without destructive migrations.
+    logger.info("Using SQLite database: %s", DB_PATH)
     init_db()
 
     if not DB_BOT_TOKEN:
@@ -3301,25 +3340,27 @@ def main():
     # Start bots with isolated retry loops. A temporary Telegram/network error
     # must not kill the entire hosting service.
     def run_bot(bot, name):
+        backoff = 5
         while True:
             try:
                 logger.info("%s polling started", name)
                 bot.infinity_polling(timeout=30, long_polling_timeout=30, skip_pending=True)
+                backoff = 5
             except Exception as exc:
                 error_text = str(exc)
-                # Telegram 409 means another polling instance owns getUpdates.
-                # Back off longer to avoid a tight restart loop while the other
-                # instance is being stopped or the deployment is settling.
                 if "409" in error_text and "getUpdates" in error_text:
+                    delay = min(120, max(30, backoff)) + random.randint(0, 5)
                     logger.error(
                         "%s polling conflict (409): another instance is polling. "
-                        "Retrying in 30 seconds.",
-                        name,
+                        "Retrying in %s seconds.", name, delay
                     )
-                    time.sleep(30)
+                    time.sleep(delay)
+                    backoff = min(120, max(30, backoff * 2))
                 else:
-                    logger.exception("%s polling stopped; retrying in 5 seconds", name)
-                    time.sleep(5)
+                    delay = min(30, backoff) + random.randint(0, 2)
+                    logger.exception("%s polling stopped; retrying in %s seconds", name, delay)
+                    time.sleep(delay)
+                    backoff = min(30, max(5, backoff * 2))
 
     threading.Thread(target=run_bot, args=(main_bot, "MAIN BOT"), daemon=True).start()
     if DB_BOT_TOKEN:
