@@ -40,7 +40,7 @@ import qrcode
 from PIL import Image, ImageDraw
 
 # ==========================
-#  CONFIGURATION (HARDCODED)
+#  CONFIGURATION (RAILWAY ENVIRONMENT VARIABLES)
 # ==========================
 # SECURITY NOTE:
 # Set these in the runtime environment:
@@ -52,8 +52,21 @@ from PIL import Image, ImageDraw
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 DB_BOT_TOKEN = os.environ.get("DB_BOT_TOKEN", "").strip()
 PAY_BOT_TOKEN = os.environ.get("PAY_BOT_TOKEN", "").strip()
-OWNER_ID = 8747221712
-CO_OWNER_ID = 5769074791
+def _env_int(name, default=0):
+    """Read an integer setting from Railway/environment safely."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid integer environment variable %s; using %s", name, default)
+        return default
+
+OWNER_ID = _env_int("OWNER_ID")
+CO_OWNER_ID = _env_int("CO_OWNER_ID")
+OWNER_USERNAME = os.environ.get("OWNER_USERNAME", "").strip().lstrip("@")
+CO_OWNER_USERNAME = os.environ.get("CO_OWNER_USERNAME", "").strip().lstrip("@")
 UPI_ID = os.environ.get("UPI_ID", "abhirajkathole60@okicici").strip()
 UPI_LOGO = ""  # optional path to logo
 
@@ -63,15 +76,8 @@ BRAND_VER = "V12.09.000"
 STUDIO = "VOLT ⚡ STUDIO"
 FOOTER = f"\n© 2026 {STUDIO}\nAll Rights Reserved."
 
-# Database — never delete/replace existing user data during startup.
-_DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
-_RAILWAY_VOLUME = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
-if _DATABASE_URL:
-    DB_PATH = _DATABASE_URL
-elif _RAILWAY_VOLUME:
-    DB_PATH = os.path.join(_RAILWAY_VOLUME, "volthosting.db")
-else:
-    DB_PATH = "volthosting.db"
+# Database
+DB_PATH = os.environ.get("DATABASE_URL", "volthosting.db")
 if DB_PATH.startswith("sqlite:///"):
     DB_PATH = DB_PATH.replace("sqlite:///", "")
 try:
@@ -89,7 +95,7 @@ logging.basicConfig(
 logger = logging.getLogger("VOLT")
 
 # Limits
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
+MAX_FILE_SIZE = None  # No application-level upload size limit
 ALLOWED_EXTENSIONS = {'.py', '.js', '.java', '.cpp', '.c', '.sh', '.txt', '.json', '.html', '.css', '.zip'}
 RATE_LIMITS = {
     'upload': (3, 60),        # 3 per minute
@@ -103,9 +109,9 @@ HOSTING_MAX_CPU_SECONDS = int(os.environ.get("HOSTING_MAX_CPU_SECONDS", "300"))
 HOSTING_MAX_MEMORY_MB = int(os.environ.get("HOSTING_MAX_MEMORY_MB", "512"))
 HOSTING_MAX_PROCESSES = int(os.environ.get("HOSTING_MAX_PROCESSES", "64"))
 HOSTING_MAX_OPEN_FILES = int(os.environ.get("HOSTING_MAX_OPEN_FILES", "128"))
-HOSTING_MAX_OUTPUT_MB = int(os.environ.get("HOSTING_MAX_OUTPUT_MB", "20"))
+HOSTING_MAX_OUTPUT_MB = None  # No application-level output file size limit
 HOSTING_MAX_ZIP_FILES = int(os.environ.get("HOSTING_MAX_ZIP_FILES", "2000"))
-HOSTING_MAX_ZIP_UNCOMPRESSED_MB = int(os.environ.get("HOSTING_MAX_ZIP_UNCOMPRESSED_MB", "250"))
+HOSTING_MAX_ZIP_UNCOMPRESSED_MB = None  # No application-level ZIP expansion limit
 HOSTING_MAX_COMMAND_ARGS = 32
 
 # Defense-in-depth: hosted processes must never inherit these host secrets.
@@ -122,7 +128,7 @@ _DB_WRITE_LOCK = threading.RLock()
 _DB_RETRY_DELAYS = (0.02, 0.05, 0.1, 0.2, 0.4, 0.8, 1.2)
 
 class _RetryingCursor(sqlite3.Cursor):
-    _WRITE_SQL = ("INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP", "ALTER")
+    _WRITE_SQL = ("INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP", "ALTER", "PRAGMA")
 
     def _is_write(self, sql):
         return str(sql).lstrip().upper().startswith(self._WRITE_SQL)
@@ -219,46 +225,12 @@ def get_db():
     conn.execute("PRAGMA cache_size = -32000")
     return conn
 
-def _backup_sqlite_database():
-    """Create a non-destructive SQLite backup before startup schema work."""
-    try:
-        if DB_PATH == ":memory:":
-            return
-        db_file = Path(DB_PATH)
-        if not db_file.exists() or db_file.stat().st_size == 0:
-            return
-        backup_dir = db_file.parent / "db_backups"
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
-        backup_path = backup_dir / f"volthosting_{stamp}.db"
-        src_conn = sqlite3.connect(str(db_file), timeout=8)
-        dst_conn = sqlite3.connect(str(backup_path), timeout=8)
-        try:
-            src_conn.backup(dst_conn)
-            dst_conn.commit()
-        finally:
-            dst_conn.close()
-            src_conn.close()
-        backups = sorted(backup_dir.glob("volthosting_*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
-        for old in backups[5:]:
-            try:
-                old.unlink()
-            except OSError:
-                pass
-        logger.info("SQLite safety backup created: %s", backup_path)
-    except Exception as exc:
-        logger.warning("SQLite startup backup skipped: %s", exc)
-
 def init_db():
-    _backup_sqlite_database()
     conn = get_db()
     c = conn.cursor()
     # Configure WAL once at startup; never toggle journal mode per request.
-    try:
-        c.execute("PRAGMA journal_mode = WAL")
-        c.execute("PRAGMA synchronous = NORMAL")
-    except sqlite3.OperationalError as exc:
-        logger.warning("SQLite WAL setup skipped: %s", exc)
+    c.execute("PRAGMA journal_mode = WAL")
+    c.execute("PRAGMA synchronous = NORMAL")
     c.executescript('''
         PRAGMA foreign_keys = ON;
         CREATE TABLE IF NOT EXISTS users (
@@ -416,11 +388,7 @@ def init_db():
         ("2_years", "2 YEARS", 2598, 730),
     ]
     for plan in plans:
-        c.execute(\
-        "INSERT INTO plans (id, name, price, duration_days) VALUES (?,?,?,?) "\
-        "ON CONFLICT(id) DO UPDATE SET name=excluded.name, price=excluded.price, duration_days=excluded.duration_days",\
-        plan\
-    )
+        c.execute("INSERT OR REPLACE INTO plans (id, name, price, duration_days) VALUES (?,?,?,?)", plan)
     conn.commit()
     conn.close()
     logger.info("Database initialized.")
@@ -527,8 +495,9 @@ def _apply_process_sandbox():
     except Exception:
         pass
     try:
-        max_bytes = HOSTING_MAX_OUTPUT_MB * 1024 * 1024
-        resource.setrlimit(resource.RLIMIT_FSIZE, (max_bytes, max_bytes))
+        if HOSTING_MAX_OUTPUT_MB is not None:
+            max_bytes = HOSTING_MAX_OUTPUT_MB * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_FSIZE, (max_bytes, max_bytes))
     except Exception:
         pass
     try:
@@ -678,13 +647,13 @@ def rate_limit_decorator(action: str):
 # ==========================
 #  KEYBOARDS
 # ==========================
-def main_menu_kb():
+def main_menu_kb(user_id=None):
     """Screenshot-1 options rendered in screenshot-2 style: a compact 2-column reply keyboard."""
     kb = types.ReplyKeyboardMarkup(
         resize_keyboard=True,
         row_width=2,
         selective=False,
-        input_field_placeholder="⚡ Choose VOLT option…",
+        input_field_placeholder="Choose an option…",
     )
     rows = [
         ("🚀 MY HOSTING", "📁 MY FILES"),
@@ -693,13 +662,19 @@ def main_menu_kb():
         ("🎫 SUPPORT", "👤 MY ACCOUNT"),
         ("ℹ️ ABOUT VOLT",),
     ]
+    # Owner/Co-Owner only: expose Admin Panel in the reply keyboard.
+    # Authorization remains ID-based and uses Railway Variables above.
+    # `current_user_id` is attached by the start/menu handlers when available.
+    current_user_id = user_id or 0
+    if current_user_id and is_admin(current_user_id):
+        rows.append(("🛠️ ADMIN PANEL",))
     for row in rows:
         kb.row(*(types.KeyboardButton(label) for label in row))
     return kb
 
 # Alias kept for existing code that already uses the screenshot-style menu.
-def user_reply_menu_kb():
-    return main_menu_kb()
+def user_reply_menu_kb(user_id=None):
+    return main_menu_kb(user_id)
 
 def back_main_kb():
     return types.InlineKeyboardMarkup().add(
@@ -741,7 +716,7 @@ def show_my_files_message(message):
         main_bot.send_message(message.chat.id, text, reply_markup=files_inline_kb())
         return
 
-    text = "📁 <b>MY SCRIPTS</b> • <i>V12.09.000</i>\n\n"
+    text = "📁 <b>MY SCRIPTS</b>\n\n"
     kb = types.InlineKeyboardMarkup(row_width=1)
     for f in files:
         size = f["size"] or 0
@@ -805,7 +780,7 @@ def send_upload_prompt(message):
         message.chat.id,
         "📤 <b>UPLOAD FILE</b>\n\n"
         "Send your project file here as a Telegram document.\n"
-        f"Maximum size: <b>{MAX_FILE_SIZE // 1024 // 1024} MB</b>.",
+        "Maximum size: <b>No application limit</b>.",
         reply_markup=upload_prompt_kb()
     )
 
@@ -826,23 +801,20 @@ def cmd_start(message: types.Message):
     update_last_active(user.id)
     username = user.username if user.username else "Not Set"
     text = f"""
-⚡ <b>{BRAND}</b>
-<b>V12.09.000 • STABLE</b>
+<b>{BRAND}</b>
 
-👋 Welcome, <b>{user.first_name}</b>!
+Welcome, {user.first_name}!
 
 👤 Username: @{username}
-🆔 Telegram ID: <code>{user.id}</code>
 
-🚀 <b>Fast • Stable • Secure</b>
-Your hosting dashboard is ready.
+Welcome to {BRAND}.
 
 Choose an option below:
 """
     main_bot.send_message(
         message.chat.id,
         text,
-        reply_markup=user_reply_menu_kb()
+        reply_markup=user_reply_menu_kb(user.id)
     )
 
 # ---------- FILE UPLOAD ----------
@@ -859,9 +831,7 @@ def handle_document(message: types.Message):
     update_last_active(user.id)
 
     file_info = message.document
-    if file_info.file_size > MAX_FILE_SIZE:
-        main_bot.reply_to(message, f"⚠️ File too large. Max {MAX_FILE_SIZE//1024//1024} MB.")
-        return
+    # No application-level file-size limit; platform/Telegram limits still apply.
 
     # Basic extension check (optional)
     ext = Path(file_info.file_name).suffix.lower()
@@ -1399,8 +1369,10 @@ def compat_admin_panel(message):
     main_bot.send_message(
         message.chat.id,
         "🛠️ <b>ADMIN PANEL</b>\n\n"
-        "Use the deployment approval buttons sent to this admin chat.\n"
-        "The DB bot provides database/file management commands."
+        "👑 <b>Owner:</b> " + (f"@{OWNER_USERNAME}" if OWNER_USERNAME else "Configured") + "\n"
+        "🤝 <b>Co-Owner:</b> " + (f"@{CO_OWNER_USERNAME}" if CO_OWNER_USERNAME else "Configured") + "\n\n"
+        "📦 Deployment approvals and 💳 payment approvals will appear here when pending.\n"
+        "📁 Database/file management is handled by the DB bot."
     )
 
 # ---------- OTHER TEXT ----------
@@ -1438,7 +1410,7 @@ def main_callback(call):
             main_bot.send_message(
                 call.message.chat.id,
                 "Choose an option:",
-                reply_markup=main_menu_kb()
+                reply_markup=main_menu_kb(call.from_user.id)
             )
 
         elif data == "menu_files":
@@ -1958,7 +1930,7 @@ def _extract_zip_safe(zip_path, destination):
         if len(infos) > HOSTING_MAX_ZIP_FILES:
             raise ValueError("ZIP contains too many files.")
         total = sum(max(0, i.file_size) for i in infos)
-        if total > HOSTING_MAX_ZIP_UNCOMPRESSED_MB * 1024 * 1024:
+        if HOSTING_MAX_ZIP_UNCOMPRESSED_MB is not None and total > HOSTING_MAX_ZIP_UNCOMPRESSED_MB * 1024 * 1024:
             raise ValueError("ZIP expands beyond the allowed limit.")
         for member in infos:
             name = member.filename.replace("\\", "/")
@@ -3309,21 +3281,17 @@ def pay_other(message):
 #  GRACEFUL SHUTDOWN
 # ==========================
 def shutdown(signum=None, frame=None):
-    logger.info("Graceful shutdown requested (signal=%s). Preserving database and files.", signum)
-    try:
-        conn = get_db()
-        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-        conn.close()
-    except Exception as exc:
-        logger.warning("Shutdown SQLite checkpoint skipped: %s", exc)
+    logger.info("Shutting down...")
+    # Stop all managed processes? We'll let them be; they will be reaped on restart.
+    # We could also stop all hosting processes, but for production we may want to keep them running.
+    # For simplicity, we just exit.
     sys.exit(0)
 
 # ==========================
 #  MAIN
 # ==========================
 def main():
-    # Initialize DB without destructive migrations.
-    logger.info("Using SQLite database: %s", DB_PATH)
+    # Initialize DB
     init_db()
 
     if not DB_BOT_TOKEN:
@@ -3340,27 +3308,25 @@ def main():
     # Start bots with isolated retry loops. A temporary Telegram/network error
     # must not kill the entire hosting service.
     def run_bot(bot, name):
-        backoff = 5
+        # Resilient polling loop: temporary Telegram/network failures do not
+        # terminate the service. Backoff prevents a tight crash/retry loop.
+        retry_delay = 5
         while True:
             try:
                 logger.info("%s polling started", name)
                 bot.infinity_polling(timeout=30, long_polling_timeout=30, skip_pending=True)
-                backoff = 5
+                retry_delay = 5
             except Exception as exc:
-                error_text = str(exc)
-                if "409" in error_text and "getUpdates" in error_text:
-                    delay = min(120, max(30, backoff)) + random.randint(0, 5)
+                message = str(exc)
+                if "409" in message and "getUpdates" in message:
                     logger.error(
-                        "%s polling conflict (409): another instance is polling. "
-                        "Retrying in %s seconds.", name, delay
+                        "%s polling conflict (409): another instance is using this bot token. "
+                        "Waiting %ss before retry.", name, retry_delay
                     )
-                    time.sleep(delay)
-                    backoff = min(120, max(30, backoff * 2))
                 else:
-                    delay = min(30, backoff) + random.randint(0, 2)
-                    logger.exception("%s polling stopped; retrying in %s seconds", name, delay)
-                    time.sleep(delay)
-                    backoff = min(30, max(5, backoff * 2))
+                    logger.exception("%s polling stopped; retrying in %ss", name, retry_delay)
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 60)
 
     threading.Thread(target=run_bot, args=(main_bot, "MAIN BOT"), daemon=True).start()
     if DB_BOT_TOKEN:
@@ -3369,7 +3335,7 @@ def main():
         threading.Thread(target=run_bot, args=(pay_bot, "PAY BOT"), daemon=True).start()
 
     logger.info(f"{BRAND} started. Version {BRAND_VER}.")
-    logger.info(f"Owner ID: {OWNER_ID}, Co-Owner ID: {CO_OWNER_ID}")
+    logger.info("Owner/Co-Owner admin configuration loaded from Railway Variables (IDs are not logged).")
 
     # Register signal handlers
     signal.signal(signal.SIGINT, shutdown)
