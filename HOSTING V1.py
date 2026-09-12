@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 VOLT ⚡ HOSTING - Professional Telegram Hosting Platform
-Version: V12.08.000
+Version: V12.09.000
 Powered by VOLT ⚡ STUDIO
 © 2026 VOLT ⚡ STUDIO — All Rights Reserved.
 
@@ -59,12 +59,18 @@ UPI_LOGO = ""  # optional path to logo
 
 # Branding
 BRAND = "VOLT ⚡ HOSTING"
-BRAND_VER = "V12.08.000"
+BRAND_VER = "V12.09.000"
 STUDIO = "VOLT ⚡ STUDIO"
 FOOTER = f"\n© 2026 {STUDIO}\nAll Rights Reserved."
 
-# Database
-DB_PATH = os.environ.get("DATABASE_URL", "volthosting.db")
+# Database — never delete/replace existing user data during startup.\n_DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+_RAILWAY_VOLUME = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+if _DATABASE_URL:
+    DB_PATH = _DATABASE_URL
+elif _RAILWAY_VOLUME:
+    DB_PATH = os.path.join(_RAILWAY_VOLUME, "volthosting.db")
+else:
+    DB_PATH = "volthosting.db"
 if DB_PATH.startswith("sqlite:///"):
     DB_PATH = DB_PATH.replace("sqlite:///", "")
 try:
@@ -375,7 +381,11 @@ def init_db():
         ("2_years", "2 YEARS", 2598, 730),
     ]
     for plan in plans:
-        c.execute("INSERT OR REPLACE INTO plans (id, name, price, duration_days) VALUES (?,?,?,?)", plan)
+        c.execute(\
+        "INSERT INTO plans (id, name, price, duration_days) VALUES (?,?,?,?) "\
+        "ON CONFLICT(id) DO UPDATE SET name=excluded.name, price=excluded.price, duration_days=excluded.duration_days",\
+        plan\
+    )
     conn.commit()
     conn.close()
     logger.info("Database initialized.")
@@ -639,7 +649,7 @@ def main_menu_kb():
         resize_keyboard=True,
         row_width=2,
         selective=False,
-        input_field_placeholder="Choose an option…",
+        input_field_placeholder="⚡ Choose VOLT option…",
     )
     rows = [
         ("🚀 MY HOSTING", "📁 MY FILES"),
@@ -696,7 +706,7 @@ def show_my_files_message(message):
         main_bot.send_message(message.chat.id, text, reply_markup=files_inline_kb())
         return
 
-    text = "📁 <b>MY SCRIPTS</b>\n\n"
+    text = "📁 <b>MY SCRIPTS</b> • <i>V12.09.000</i>\n\n"
     kb = types.InlineKeyboardMarkup(row_width=1)
     for f in files:
         size = f["size"] or 0
@@ -781,13 +791,16 @@ def cmd_start(message: types.Message):
     update_last_active(user.id)
     username = user.username if user.username else "Not Set"
     text = f"""
-<b>{BRAND}</b>
+⚡ <b>{BRAND}</b>
+<b>V12.09.000 • STABLE</b>
 
-Welcome, {user.first_name}!
+👋 Welcome, <b>{user.first_name}</b>!
 
 👤 Username: @{username}
+🆔 Telegram ID: <code>{user.id}</code>
 
-Welcome to {BRAND}.
+🚀 <b>Fast • Stable • Secure</b>
+Your hosting dashboard is ready.
 
 Choose an option below:
 """
@@ -3292,9 +3305,21 @@ def main():
             try:
                 logger.info("%s polling started", name)
                 bot.infinity_polling(timeout=30, long_polling_timeout=30, skip_pending=True)
-            except Exception:
-                logger.exception("%s polling stopped; retrying in 5 seconds", name)
-                time.sleep(5)
+            except Exception as exc:
+                error_text = str(exc)
+                # Telegram 409 means another polling instance owns getUpdates.
+                # Back off longer to avoid a tight restart loop while the other
+                # instance is being stopped or the deployment is settling.
+                if "409" in error_text and "getUpdates" in error_text:
+                    logger.error(
+                        "%s polling conflict (409): another instance is polling. "
+                        "Retrying in 30 seconds.",
+                        name,
+                    )
+                    time.sleep(30)
+                else:
+                    logger.exception("%s polling stopped; retrying in 5 seconds", name)
+                    time.sleep(5)
 
     threading.Thread(target=run_bot, args=(main_bot, "MAIN BOT"), daemon=True).start()
     if DB_BOT_TOKEN:
