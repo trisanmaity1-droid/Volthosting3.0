@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 VOLT ⚡ HOSTING - Professional Telegram Hosting Platform
-Version: V09.00.000
+Version: V12.08.000
 Powered by VOLT ⚡ STUDIO
 © 2026 VOLT ⚡ STUDIO — All Rights Reserved.
 
@@ -59,7 +59,7 @@ UPI_LOGO = ""  # optional path to logo
 
 # Branding
 BRAND = "VOLT ⚡ HOSTING"
-BRAND_VER = "V09.00.000"
+BRAND_VER = "V12.08.000"
 STUDIO = "VOLT ⚡ STUDIO"
 FOOTER = f"\n© 2026 {STUDIO}\nAll Rights Reserved."
 
@@ -67,6 +67,12 @@ FOOTER = f"\n© 2026 {STUDIO}\nAll Rights Reserved."
 DB_PATH = os.environ.get("DATABASE_URL", "volthosting.db")
 if DB_PATH.startswith("sqlite:///"):
     DB_PATH = DB_PATH.replace("sqlite:///", "")
+try:
+    _db_parent = os.path.dirname(os.path.abspath(DB_PATH))
+    if _db_parent:
+        os.makedirs(_db_parent, exist_ok=True)
+except Exception:
+    pass
 
 # Logging
 logging.basicConfig(
@@ -105,19 +111,113 @@ HOST_SECRET_ENV_KEYS = {
 # ==========================
 #  DATABASE HELPERS
 # ==========================
+_DB_WRITE_LOCK = threading.RLock()
+_DB_RETRY_DELAYS = (0.02, 0.05, 0.1, 0.2, 0.4, 0.8, 1.2)
+
+class _RetryingCursor(sqlite3.Cursor):
+    _WRITE_SQL = ("INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP", "ALTER", "PRAGMA")
+
+    def _is_write(self, sql):
+        return str(sql).lstrip().upper().startswith(self._WRITE_SQL)
+
+    def execute(self, sql, parameters=()):
+        if self._is_write(sql):
+            self.connection._acquire_write_lock()
+        last_exc = None
+        for delay in (0.0,) + _DB_RETRY_DELAYS:
+            try:
+                return super().execute(sql, parameters)
+            except sqlite3.OperationalError as exc:
+                last_exc = exc
+                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                    raise
+                if delay:
+                    time.sleep(delay)
+        raise last_exc
+
+    def executemany(self, sql, parameters):
+        if self._is_write(sql):
+            self.connection._acquire_write_lock()
+        last_exc = None
+        for delay in (0.0,) + _DB_RETRY_DELAYS:
+            try:
+                return super().executemany(sql, parameters)
+            except sqlite3.OperationalError as exc:
+                last_exc = exc
+                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                    raise
+                if delay:
+                    time.sleep(delay)
+        raise last_exc
+
+class _RetryingConnection(sqlite3.Connection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._write_lock_held = False
+
+    def _acquire_write_lock(self):
+        if not self._write_lock_held:
+            _DB_WRITE_LOCK.acquire()
+            self._write_lock_held = True
+
+    def _release_write_lock(self):
+        if self._write_lock_held:
+            self._write_lock_held = False
+            _DB_WRITE_LOCK.release()
+
+    def cursor(self, factory=None):
+        return super().cursor(factory or _RetryingCursor)
+
+    def commit(self):
+        last_exc = None
+        for delay in (0.0,) + _DB_RETRY_DELAYS:
+            try:
+                result = super().commit()
+                self._release_write_lock()
+                return result
+            except sqlite3.OperationalError as exc:
+                last_exc = exc
+                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                    self._release_write_lock()
+                    raise
+                if delay:
+                    time.sleep(delay)
+        self._release_write_lock()
+        raise last_exc
+
+    def rollback(self):
+        try:
+            return super().rollback()
+        finally:
+            self._release_write_lock()
+
+    def close(self):
+        try:
+            return super().close()
+        finally:
+            self._release_write_lock()
+
 def get_db():
-    # One shared SQLite database for main/DB/payment bots.
-    # timeout + WAL prevent "database is locked" when several bot threads write together.
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+    # Fast, resilient SQLite connection. WAL is configured once during init_db(),
+    # not on every request (PRAGMA journal_mode=WAL itself can briefly lock SQLite).
+    conn = sqlite3.connect(
+        DB_PATH, timeout=8, check_same_thread=False,
+        isolation_level="DEFERRED", factory=_RetryingConnection
+    )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA busy_timeout = 8000")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA temp_store = MEMORY")
+    conn.execute("PRAGMA cache_size = -32000")
     return conn
 
 def init_db():
     conn = get_db()
     c = conn.cursor()
+    # Configure WAL once at startup; never toggle journal mode per request.
+    c.execute("PRAGMA journal_mode = WAL")
+    c.execute("PRAGMA synchronous = NORMAL")
     c.executescript('''
         PRAGMA foreign_keys = ON;
         CREATE TABLE IF NOT EXISTS users (
@@ -253,7 +353,16 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_deployments_user_id ON deployments(user_id);
         CREATE INDEX IF NOT EXISTS idx_hosting_user_id ON hosting(user_id);
         CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id);
-        CREATE INDEX IF NOT EXISTS idx_tickets_user_id ON tickets(user_id);
+        CREATE INDEX IF NOT EXISTS idx_payments_utr ON payments(utr);
+        CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
+        CREATE INDEX IF NOT EXISTS idx_files_user_id ON files(user_id);
+        CREATE INDEX IF NOT EXISTS idx_hosting_status ON hosting(status);
+        CREATE INDEX IF NOT EXISTS idx_deployments_status ON deployments(status);
+        CREATE INDEX IF NOT EXISTS idx_tickets_user_status ON tickets(user_id, status);
+        CREATE INDEX IF NOT EXISTS idx_ticket_messages_ticket_id ON ticket_messages(ticket_id);
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_admin_id ON audit_logs(admin_id);
+        CREATE INDEX IF NOT EXISTS idx_receipts_payment_id ON receipts(payment_id);
+        CREATE INDEX IF NOT EXISTS idx_receipts_utr ON receipts(utr);
     ''')
 
     # Insert/update plans (exact list)
@@ -403,25 +512,41 @@ def _validate_command(parts):
     if any(Path(x).name in forbidden for x in parts):
         raise ValueError("Privileged/system command is not allowed")
 
+_LAST_ACTIVE_CACHE = {}
+_LAST_ACTIVE_LOCK = threading.Lock()
+_LAST_ACTIVE_TTL = 60.0
+
 def create_user(user: types.User):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT id FROM users WHERE id=?", (user.id,))
-    if c.fetchone() is None:
-        c.execute(
-            "INSERT INTO users (id, username, first_name, last_name) VALUES (?,?,?,?)",
-            (user.id, user.username, user.first_name, user.last_name)
-        )
-        conn.commit()
-        log_audit(user.id, user.first_name or "User", "REGISTER", f"User registered")
-    conn.close()
+    # Single atomic upsert: avoids SELECT-then-INSERT races and one extra DB round trip.
+    with _DB_WRITE_LOCK:
+        conn = get_db()
+        try:
+            conn.execute(
+                "INSERT INTO users (id, username, first_name, last_name) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET username=excluded.username, first_name=excluded.first_name, last_name=excluded.last_name",
+                (user.id, user.username, user.first_name, user.last_name)
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 def update_last_active(user_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("UPDATE users SET last_active=? WHERE id=?", (now_utc(), user_id))
-    conn.commit()
-    conn.close()
+    # Do not write SQLite on every Telegram update. This removes a major source of
+    # contention/latency while keeping activity timestamps reasonably fresh.
+    now = time.monotonic()
+    uid = int(user_id)
+    with _LAST_ACTIVE_LOCK:
+        previous = _LAST_ACTIVE_CACHE.get(uid, 0.0)
+        if now - previous < _LAST_ACTIVE_TTL:
+            return
+        _LAST_ACTIVE_CACHE[uid] = now
+    with _DB_WRITE_LOCK:
+        conn = get_db()
+        try:
+            conn.execute("UPDATE users SET last_active=? WHERE id=?", (now_utc(), uid))
+            conn.commit()
+        finally:
+            conn.close()
 
 def is_admin(user_id):
     return user_id in (OWNER_ID, CO_OWNER_ID)
@@ -1862,7 +1987,8 @@ def start_hosting(deploy_id):
             env=env,
             shell=False,
             start_new_session=(os.name == "posix"),
-            preexec_fn=_apply_process_sandbox if os.name == "posix" else None,
+            # Railway/container-safe: do not use preexec_fn (can raise SubprocessError).
+            preexec_fn=None,
             bufsize=1,
             close_fds=True,
         )
