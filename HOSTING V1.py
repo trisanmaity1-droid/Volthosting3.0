@@ -522,7 +522,7 @@ def create_user(user: types.User):
         conn = get_db()
         try:
             conn.execute(
-                "INSERT INTO users (id, username, first_name, last_name) VALUES (?,?,?,?,?) "
+                "INSERT INTO users (id, username, first_name, last_name) VALUES (?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET username=excluded.username, first_name=excluded.first_name, last_name=excluded.last_name",
                 (user.id, user.username, user.first_name, user.last_name)
             )
