@@ -1366,14 +1366,125 @@ def compat_admin_panel(message):
     if not is_admin(message.from_user.id):
         main_bot.send_message(message.chat.id, "⛔ <b>Admin only.</b>")
         return
-    main_bot.send_message(
-        message.chat.id,
-        "🛠️ <b>ADMIN PANEL</b>\n\n"
-        "👑 <b>Owner:</b> " + (f"@{OWNER_USERNAME}" if OWNER_USERNAME else "Configured") + "\n"
-        "🤝 <b>Co-Owner:</b> " + (f"@{CO_OWNER_USERNAME}" if CO_OWNER_USERNAME else "Configured") + "\n\n"
-        "📦 Deployment approvals and 💳 payment approvals will appear here when pending.\n"
-        "📁 Database/file management is handled by the DB bot."
+    show_admin_panel(message)
+
+def admin_panel_kb():
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("📊 DASHBOARD", callback_data="admin_dashboard"),
+        types.InlineKeyboardButton("📜 LOGS", callback_data="admin_logs"),
     )
+    kb.add(
+        types.InlineKeyboardButton("🚀 DEPLOYMENTS", callback_data="admin_deployments"),
+        types.InlineKeyboardButton("💳 PAYMENTS", callback_data="admin_payments"),
+    )
+    kb.add(
+        types.InlineKeyboardButton("🔄 REFRESH", callback_data="admin_refresh"),
+        types.InlineKeyboardButton("🏠 MAIN MENU", callback_data="menu_main"),
+    )
+    return kb
+
+def show_admin_panel(message_or_call):
+    user = message_or_call.from_user
+    if not is_admin(user.id):
+        if hasattr(message_or_call, "id"):
+            main_bot.answer_callback_query(message_or_call.id, "⛔ Unauthorized")
+        else:
+            main_bot.send_message(message_or_call.chat.id, "⛔ <b>Admin only.</b>")
+        return
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) AS cnt FROM deployments WHERE status='PENDING_APPROVAL'")
+    pending_deployments = c.fetchone()["cnt"]
+    c.execute("SELECT COUNT(*) AS cnt FROM payments WHERE status='PENDING'")
+    pending_payments = c.fetchone()["cnt"]
+    c.execute("SELECT COUNT(*) AS cnt FROM users")
+    users = c.fetchone()["cnt"]
+    c.execute("SELECT COUNT(*) AS cnt FROM hosting WHERE status='ONLINE'")
+    online = c.fetchone()["cnt"]
+    conn.close()
+
+    owner = f"@{OWNER_USERNAME}" if OWNER_USERNAME else "Configured"
+    co_owner = f"@{CO_OWNER_USERNAME}" if CO_OWNER_USERNAME else "Configured"
+    text = (
+        "🛠️ <b>VOLT ADMIN PANEL</b>\n\n"
+        f"👑 <b>Owner:</b> {owner}\n"
+        f"🤝 <b>Co-Owner:</b> {co_owner}\n\n"
+        "📊 <b>LIVE OVERVIEW</b>\n"
+        f"👥 Users: <b>{users}</b>\n"
+        f"🟢 Online Hosting: <b>{online}</b>\n"
+        f"🚀 Pending Deployments: <b>{pending_deployments}</b>\n"
+        f"💳 Pending Payments: <b>{pending_payments}</b>\n\n"
+        "Select an admin option below."
+    )
+    kb = admin_panel_kb()
+    if hasattr(message_or_call, "message"):
+        main_bot.edit_message_text(text, reply_markup=kb, chat_id=message_or_call.message.chat.id, message_id=message_or_call.message.message_id)
+    else:
+        main_bot.send_message(message_or_call.chat.id, text, reply_markup=kb)
+
+def show_admin_logs(call):
+    if not is_admin(call.from_user.id):
+        main_bot.answer_callback_query(call.id, "⛔ Unauthorized")
+        return
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT id, admin_id, admin_name, action, details, timestamp FROM audit_logs ORDER BY id DESC LIMIT 15")
+    rows = c.fetchall()
+    conn.close()
+
+    lines = ["📜 <b>ADMIN AUDIT LOGS</b>", "", "Showing latest 15 actions:", ""]
+    if not rows:
+        lines.append("No audit logs found yet.")
+    else:
+        for r in rows:
+            admin = r["admin_name"] or str(r["admin_id"])
+            details = r["details"] or "—"
+            lines.append(
+                f"<b>#{r['id']}</b> • <b>{r['action']}</b>\n"
+                f"👤 {admin} (<code>{r['admin_id']}</code>)\n"
+                f"📝 {details}\n"
+                f"🕐 {fmt_ts(r['timestamp'])}\n"
+            )
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("🔄 REFRESH LOGS", callback_data="admin_logs"),
+        types.InlineKeyboardButton("◀️ ADMIN PANEL", callback_data="admin_dashboard"),
+    )
+    main_bot.edit_message_text("\n".join(lines), reply_markup=kb, chat_id=call.message.chat.id, message_id=call.message.message_id)
+    main_bot.answer_callback_query(call.id)
+
+def show_admin_queue(call, kind):
+    if not is_admin(call.from_user.id):
+        main_bot.answer_callback_query(call.id, "⛔ Unauthorized")
+        return
+    conn = get_db()
+    c = conn.cursor()
+    if kind == "deployments":
+        c.execute("SELECT id, user_id, file_id, status, created_at FROM deployments WHERE status='PENDING_APPROVAL' ORDER BY created_at DESC LIMIT 20")
+        rows = c.fetchall()
+        title = "🚀 <b>PENDING DEPLOYMENTS</b>"
+        if not rows:
+            body = "No pending deployment approvals."
+        else:
+            body = "\n\n".join(f"🚀 <b>{r['id']}</b>\n👤 User: <code>{r['user_id']}</code>\n📁 File ID: <code>{r['file_id']}</code>\n🕐 {fmt_ts(r['created_at'])}" for r in rows)
+    else:
+        c.execute("SELECT id, user_id, plan_id, amount, utr, status, created_at FROM payments WHERE status='PENDING' ORDER BY created_at DESC LIMIT 20")
+        rows = c.fetchall()
+        title = "💳 <b>PENDING PAYMENTS</b>"
+        if not rows:
+            body = "No pending payment approvals."
+        else:
+            body = "\n\n".join(f"💳 <b>{r['id']}</b>\n👤 User: <code>{r['user_id']}</code>\n📦 Plan: {r['plan_id']}\n💰 Amount: ₹{r['amount']}\n🔢 UTR: <code>{r['utr']}</code>\n🕐 {fmt_ts(r['created_at'])}" for r in rows)
+    conn.close()
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("◀️ ADMIN PANEL", callback_data="admin_dashboard"),
+        types.InlineKeyboardButton("📜 LOGS", callback_data="admin_logs"),
+    )
+    main_bot.edit_message_text(title + "\n\n" + body, reply_markup=kb, chat_id=call.message.chat.id, message_id=call.message.message_id)
+    main_bot.answer_callback_query(call.id)
 
 # ---------- OTHER TEXT ----------
 @main_bot.message_handler(func=lambda m: True)
@@ -1444,6 +1555,29 @@ def main_callback(call):
         elif data == "menu_about":
             main_bot.answer_callback_query(call.id)
             show_about(call)
+
+        elif data == "admin_dashboard":
+            if not is_admin(user.id):
+                main_bot.answer_callback_query(call.id, "⛔ Unauthorized")
+                return
+            main_bot.answer_callback_query(call.id)
+            show_admin_panel(call)
+
+        elif data == "admin_refresh":
+            if not is_admin(user.id):
+                main_bot.answer_callback_query(call.id, "⛔ Unauthorized")
+                return
+            main_bot.answer_callback_query(call.id, "🔄 Refreshed")
+            show_admin_panel(call)
+
+        elif data == "admin_logs":
+            show_admin_logs(call)
+
+        elif data == "admin_deployments":
+            show_admin_queue(call, "deployments")
+
+        elif data == "admin_payments":
+            show_admin_queue(call, "payments")
 
         elif data == "menu_hosting":
             main_bot.answer_callback_query(call.id)
