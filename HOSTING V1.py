@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 VOLT ⚡ HOSTING - Professional Telegram Hosting Platform
-Version: V12.09.000
+Version: V09.00.000
 Powered by VOLT ⚡ STUDIO
 © 2026 VOLT ⚡ STUDIO — All Rights Reserved.
 
@@ -40,7 +40,7 @@ import qrcode
 from PIL import Image, ImageDraw
 
 # ==========================
-#  CONFIGURATION (RAILWAY ENVIRONMENT VARIABLES)
+#  CONFIGURATION (HARDCODED)
 # ==========================
 # SECURITY NOTE:
 # Set these in the runtime environment:
@@ -52,40 +52,25 @@ from PIL import Image, ImageDraw
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 DB_BOT_TOKEN = os.environ.get("DB_BOT_TOKEN", "").strip()
 PAY_BOT_TOKEN = os.environ.get("PAY_BOT_TOKEN", "").strip()
-def _env_int(name, default=0):
-    """Read an integer setting from Railway/environment safely."""
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        logger.warning("Invalid integer environment variable %s; using %s", name, default)
-        return default
-
-OWNER_ID = _env_int("OWNER_ID")
-CO_OWNER_ID = _env_int("CO_OWNER_ID")
+OWNER_ID = int(os.environ.get("OWNER_ID", "0") or 0)
+CO_OWNER_ID = int(os.environ.get("CO_OWNER_ID", "0") or 0)
 OWNER_USERNAME = os.environ.get("OWNER_USERNAME", "").strip().lstrip("@")
 CO_OWNER_USERNAME = os.environ.get("CO_OWNER_USERNAME", "").strip().lstrip("@")
-UPI_ID = os.environ.get("UPI_ID", "abhirajkathole60@okicici").strip()
+UPI_ID = os.environ.get("UPI_ID", "").strip()
 UPI_LOGO = ""  # optional path to logo
 
 # Branding
 BRAND = "VOLT ⚡ HOSTING"
-BRAND_VER = "V12.09.000"
+BRAND_VER = "V09.00.000"
 STUDIO = "VOLT ⚡ STUDIO"
 FOOTER = f"\n© 2026 {STUDIO}\nAll Rights Reserved."
 
 # Database
-DB_PATH = os.environ.get("DATABASE_URL", "volthosting.db")
+DB_PATH = os.environ.get("DATABASE_URL", "/data/volthosting.db" if Path("/data").exists() else "volthosting.db")
 if DB_PATH.startswith("sqlite:///"):
-    DB_PATH = DB_PATH.replace("sqlite:///", "")
-try:
-    _db_parent = os.path.dirname(os.path.abspath(DB_PATH))
-    if _db_parent:
-        os.makedirs(_db_parent, exist_ok=True)
-except Exception:
-    pass
+    DB_PATH = DB_PATH.replace("sqlite:///", "", 1)
+DB_PATH = str(Path(DB_PATH).expanduser())
+Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
 
 # Logging
 logging.basicConfig(
@@ -95,7 +80,7 @@ logging.basicConfig(
 logger = logging.getLogger("VOLT")
 
 # Limits
-MAX_FILE_SIZE = None  # No application-level upload size limit
+MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
 ALLOWED_EXTENSIONS = {'.py', '.js', '.java', '.cpp', '.c', '.sh', '.txt', '.json', '.html', '.css', '.zip'}
 RATE_LIMITS = {
     'upload': (3, 60),        # 3 per minute
@@ -104,14 +89,14 @@ RATE_LIMITS = {
     'ticket': (2, 300),
     'callback': (30, 60),
 }
-SANDBOX_ROOT = Path("./sandbox").resolve()
+SANDBOX_ROOT = Path(os.environ.get("SANDBOX_ROOT", "/data/sandbox" if Path("/data").exists() else "./sandbox")).expanduser().resolve()
 HOSTING_MAX_CPU_SECONDS = int(os.environ.get("HOSTING_MAX_CPU_SECONDS", "300"))
 HOSTING_MAX_MEMORY_MB = int(os.environ.get("HOSTING_MAX_MEMORY_MB", "512"))
 HOSTING_MAX_PROCESSES = int(os.environ.get("HOSTING_MAX_PROCESSES", "64"))
 HOSTING_MAX_OPEN_FILES = int(os.environ.get("HOSTING_MAX_OPEN_FILES", "128"))
-HOSTING_MAX_OUTPUT_MB = None  # No application-level output file size limit
+HOSTING_MAX_OUTPUT_MB = int(os.environ.get("HOSTING_MAX_OUTPUT_MB", "20"))
 HOSTING_MAX_ZIP_FILES = int(os.environ.get("HOSTING_MAX_ZIP_FILES", "2000"))
-HOSTING_MAX_ZIP_UNCOMPRESSED_MB = None  # No application-level ZIP expansion limit
+HOSTING_MAX_ZIP_UNCOMPRESSED_MB = int(os.environ.get("HOSTING_MAX_ZIP_UNCOMPRESSED_MB", "250"))
 HOSTING_MAX_COMMAND_ARGS = 32
 
 # Defense-in-depth: hosted processes must never inherit these host secrets.
@@ -124,113 +109,19 @@ HOST_SECRET_ENV_KEYS = {
 # ==========================
 #  DATABASE HELPERS
 # ==========================
-_DB_WRITE_LOCK = threading.RLock()
-_DB_RETRY_DELAYS = (0.02, 0.05, 0.1, 0.2, 0.4, 0.8, 1.2)
-
-class _RetryingCursor(sqlite3.Cursor):
-    _WRITE_SQL = ("INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP", "ALTER", "PRAGMA")
-
-    def _is_write(self, sql):
-        return str(sql).lstrip().upper().startswith(self._WRITE_SQL)
-
-    def execute(self, sql, parameters=()):
-        if self._is_write(sql):
-            self.connection._acquire_write_lock()
-        last_exc = None
-        for delay in (0.0,) + _DB_RETRY_DELAYS:
-            try:
-                return super().execute(sql, parameters)
-            except sqlite3.OperationalError as exc:
-                last_exc = exc
-                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
-                    raise
-                if delay:
-                    time.sleep(delay)
-        raise last_exc
-
-    def executemany(self, sql, parameters):
-        if self._is_write(sql):
-            self.connection._acquire_write_lock()
-        last_exc = None
-        for delay in (0.0,) + _DB_RETRY_DELAYS:
-            try:
-                return super().executemany(sql, parameters)
-            except sqlite3.OperationalError as exc:
-                last_exc = exc
-                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
-                    raise
-                if delay:
-                    time.sleep(delay)
-        raise last_exc
-
-class _RetryingConnection(sqlite3.Connection):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._write_lock_held = False
-
-    def _acquire_write_lock(self):
-        if not self._write_lock_held:
-            _DB_WRITE_LOCK.acquire()
-            self._write_lock_held = True
-
-    def _release_write_lock(self):
-        if self._write_lock_held:
-            self._write_lock_held = False
-            _DB_WRITE_LOCK.release()
-
-    def cursor(self, factory=None):
-        return super().cursor(factory or _RetryingCursor)
-
-    def commit(self):
-        last_exc = None
-        for delay in (0.0,) + _DB_RETRY_DELAYS:
-            try:
-                result = super().commit()
-                self._release_write_lock()
-                return result
-            except sqlite3.OperationalError as exc:
-                last_exc = exc
-                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
-                    self._release_write_lock()
-                    raise
-                if delay:
-                    time.sleep(delay)
-        self._release_write_lock()
-        raise last_exc
-
-    def rollback(self):
-        try:
-            return super().rollback()
-        finally:
-            self._release_write_lock()
-
-    def close(self):
-        try:
-            return super().close()
-        finally:
-            self._release_write_lock()
-
 def get_db():
-    # Fast, resilient SQLite connection. WAL is configured once during init_db(),
-    # not on every request (PRAGMA journal_mode=WAL itself can briefly lock SQLite).
-    conn = sqlite3.connect(
-        DB_PATH, timeout=8, check_same_thread=False,
-        isolation_level="DEFERRED", factory=_RetryingConnection
-    )
+    # One shared SQLite database for main/DB/payment bots.
+    # timeout + WAL prevent "database is locked" when several bot threads write together.
+    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 8000")
-    conn.execute("PRAGMA synchronous = NORMAL")
-    conn.execute("PRAGMA temp_store = MEMORY")
-    conn.execute("PRAGMA cache_size = -32000")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
 def init_db():
     conn = get_db()
     c = conn.cursor()
-    # Configure WAL once at startup; never toggle journal mode per request.
-    c.execute("PRAGMA journal_mode = WAL")
-    c.execute("PRAGMA synchronous = NORMAL")
     c.executescript('''
         PRAGMA foreign_keys = ON;
         CREATE TABLE IF NOT EXISTS users (
@@ -366,16 +257,9 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_deployments_user_id ON deployments(user_id);
         CREATE INDEX IF NOT EXISTS idx_hosting_user_id ON hosting(user_id);
         CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id);
-        CREATE INDEX IF NOT EXISTS idx_payments_utr ON payments(utr);
-        CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
-        CREATE INDEX IF NOT EXISTS idx_files_user_id ON files(user_id);
-        CREATE INDEX IF NOT EXISTS idx_hosting_status ON hosting(status);
-        CREATE INDEX IF NOT EXISTS idx_deployments_status ON deployments(status);
-        CREATE INDEX IF NOT EXISTS idx_tickets_user_status ON tickets(user_id, status);
-        CREATE INDEX IF NOT EXISTS idx_ticket_messages_ticket_id ON ticket_messages(ticket_id);
-        CREATE INDEX IF NOT EXISTS idx_audit_logs_admin_id ON audit_logs(admin_id);
-        CREATE INDEX IF NOT EXISTS idx_receipts_payment_id ON receipts(payment_id);
-        CREATE INDEX IF NOT EXISTS idx_receipts_utr ON receipts(utr);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_utr_unique ON payments(utr) WHERE utr IS NOT NULL AND utr <> '';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_utr_unique ON payments(utr) WHERE utr IS NOT NULL AND utr <> '';
+        CREATE INDEX IF NOT EXISTS idx_tickets_user_id ON tickets(user_id);
     ''')
 
     # Insert/update plans (exact list)
@@ -495,9 +379,8 @@ def _apply_process_sandbox():
     except Exception:
         pass
     try:
-        if HOSTING_MAX_OUTPUT_MB is not None:
-            max_bytes = HOSTING_MAX_OUTPUT_MB * 1024 * 1024
-            resource.setrlimit(resource.RLIMIT_FSIZE, (max_bytes, max_bytes))
+        max_bytes = HOSTING_MAX_OUTPUT_MB * 1024 * 1024
+        resource.setrlimit(resource.RLIMIT_FSIZE, (max_bytes, max_bytes))
     except Exception:
         pass
     try:
@@ -526,41 +409,25 @@ def _validate_command(parts):
     if any(Path(x).name in forbidden for x in parts):
         raise ValueError("Privileged/system command is not allowed")
 
-_LAST_ACTIVE_CACHE = {}
-_LAST_ACTIVE_LOCK = threading.Lock()
-_LAST_ACTIVE_TTL = 60.0
-
 def create_user(user: types.User):
-    # Single atomic upsert: avoids SELECT-then-INSERT races and one extra DB round trip.
-    with _DB_WRITE_LOCK:
-        conn = get_db()
-        try:
-            conn.execute(
-                "INSERT INTO users (id, username, first_name, last_name) VALUES (?,?,?,?) "
-                "ON CONFLICT(id) DO UPDATE SET username=excluded.username, first_name=excluded.first_name, last_name=excluded.last_name",
-                (user.id, user.username, user.first_name, user.last_name)
-            )
-            conn.commit()
-        finally:
-            conn.close()
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT id FROM users WHERE id=?", (user.id,))
+    if c.fetchone() is None:
+        c.execute(
+            "INSERT INTO users (id, username, first_name, last_name) VALUES (?,?,?,?)",
+            (user.id, user.username, user.first_name, user.last_name)
+        )
+        conn.commit()
+        log_audit(user.id, user.first_name or "User", "REGISTER", f"User registered")
+    conn.close()
 
 def update_last_active(user_id):
-    # Do not write SQLite on every Telegram update. This removes a major source of
-    # contention/latency while keeping activity timestamps reasonably fresh.
-    now = time.monotonic()
-    uid = int(user_id)
-    with _LAST_ACTIVE_LOCK:
-        previous = _LAST_ACTIVE_CACHE.get(uid, 0.0)
-        if now - previous < _LAST_ACTIVE_TTL:
-            return
-        _LAST_ACTIVE_CACHE[uid] = now
-    with _DB_WRITE_LOCK:
-        conn = get_db()
-        try:
-            conn.execute("UPDATE users SET last_active=? WHERE id=?", (now_utc(), uid))
-            conn.commit()
-        finally:
-            conn.close()
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE users SET last_active=? WHERE id=?", (now_utc(), user_id))
+    conn.commit()
+    conn.close()
 
 def is_admin(user_id):
     return user_id in (OWNER_ID, CO_OWNER_ID)
@@ -647,7 +514,7 @@ def rate_limit_decorator(action: str):
 # ==========================
 #  KEYBOARDS
 # ==========================
-def main_menu_kb(user_id=None):
+def main_menu_kb():
     """Screenshot-1 options rendered in screenshot-2 style: a compact 2-column reply keyboard."""
     kb = types.ReplyKeyboardMarkup(
         resize_keyboard=True,
@@ -662,19 +529,13 @@ def main_menu_kb(user_id=None):
         ("🎫 SUPPORT", "👤 MY ACCOUNT"),
         ("ℹ️ ABOUT VOLT",),
     ]
-    # Owner/Co-Owner only: expose Admin Panel in the reply keyboard.
-    # Authorization remains ID-based and uses Railway Variables above.
-    # `current_user_id` is attached by the start/menu handlers when available.
-    current_user_id = user_id or 0
-    if current_user_id and is_admin(current_user_id):
-        rows.append(("🛠️ ADMIN PANEL",))
     for row in rows:
         kb.row(*(types.KeyboardButton(label) for label in row))
     return kb
 
 # Alias kept for existing code that already uses the screenshot-style menu.
-def user_reply_menu_kb(user_id=None):
-    return main_menu_kb(user_id)
+def user_reply_menu_kb():
+    return main_menu_kb()
 
 def back_main_kb():
     return types.InlineKeyboardMarkup().add(
@@ -780,7 +641,7 @@ def send_upload_prompt(message):
         message.chat.id,
         "📤 <b>UPLOAD FILE</b>\n\n"
         "Send your project file here as a Telegram document.\n"
-        "Maximum size: <b>No application limit</b>.",
+        f"Maximum size: <b>{MAX_FILE_SIZE // 1024 // 1024} MB</b>.",
         reply_markup=upload_prompt_kb()
     )
 
@@ -814,7 +675,7 @@ Choose an option below:
     main_bot.send_message(
         message.chat.id,
         text,
-        reply_markup=user_reply_menu_kb(user.id)
+        reply_markup=user_reply_menu_kb()
     )
 
 # ---------- FILE UPLOAD ----------
@@ -831,7 +692,9 @@ def handle_document(message: types.Message):
     update_last_active(user.id)
 
     file_info = message.document
-    # No application-level file-size limit; platform/Telegram limits still apply.
+    if file_info.file_size > MAX_FILE_SIZE:
+        main_bot.reply_to(message, f"⚠️ File too large. Max {MAX_FILE_SIZE//1024//1024} MB.")
+        return
 
     # Basic extension check (optional)
     ext = Path(file_info.file_name).suffix.lower()
@@ -1366,125 +1229,12 @@ def compat_admin_panel(message):
     if not is_admin(message.from_user.id):
         main_bot.send_message(message.chat.id, "⛔ <b>Admin only.</b>")
         return
-    show_admin_panel(message)
-
-def admin_panel_kb():
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton("📊 DASHBOARD", callback_data="admin_dashboard"),
-        types.InlineKeyboardButton("📜 LOGS", callback_data="admin_logs"),
+    main_bot.send_message(
+        message.chat.id,
+        "🛠️ <b>ADMIN PANEL</b>\n\n"
+        "Use the deployment approval buttons sent to this admin chat.\n"
+        "The DB bot provides database/file management commands."
     )
-    kb.add(
-        types.InlineKeyboardButton("🚀 DEPLOYMENTS", callback_data="admin_deployments"),
-        types.InlineKeyboardButton("💳 PAYMENTS", callback_data="admin_payments"),
-    )
-    kb.add(
-        types.InlineKeyboardButton("🔄 REFRESH", callback_data="admin_refresh"),
-        types.InlineKeyboardButton("🏠 MAIN MENU", callback_data="menu_main"),
-    )
-    return kb
-
-def show_admin_panel(message_or_call):
-    user = message_or_call.from_user
-    if not is_admin(user.id):
-        if hasattr(message_or_call, "id"):
-            main_bot.answer_callback_query(message_or_call.id, "⛔ Unauthorized")
-        else:
-            main_bot.send_message(message_or_call.chat.id, "⛔ <b>Admin only.</b>")
-        return
-
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) AS cnt FROM deployments WHERE status='PENDING_APPROVAL'")
-    pending_deployments = c.fetchone()["cnt"]
-    c.execute("SELECT COUNT(*) AS cnt FROM payments WHERE status='PENDING'")
-    pending_payments = c.fetchone()["cnt"]
-    c.execute("SELECT COUNT(*) AS cnt FROM users")
-    users = c.fetchone()["cnt"]
-    c.execute("SELECT COUNT(*) AS cnt FROM hosting WHERE status='ONLINE'")
-    online = c.fetchone()["cnt"]
-    conn.close()
-
-    owner = f"@{OWNER_USERNAME}" if OWNER_USERNAME else "Configured"
-    co_owner = f"@{CO_OWNER_USERNAME}" if CO_OWNER_USERNAME else "Configured"
-    text = (
-        "🛠️ <b>VOLT ADMIN PANEL</b>\n\n"
-        f"👑 <b>Owner:</b> {owner}\n"
-        f"🤝 <b>Co-Owner:</b> {co_owner}\n\n"
-        "📊 <b>LIVE OVERVIEW</b>\n"
-        f"👥 Users: <b>{users}</b>\n"
-        f"🟢 Online Hosting: <b>{online}</b>\n"
-        f"🚀 Pending Deployments: <b>{pending_deployments}</b>\n"
-        f"💳 Pending Payments: <b>{pending_payments}</b>\n\n"
-        "Select an admin option below."
-    )
-    kb = admin_panel_kb()
-    if hasattr(message_or_call, "message"):
-        main_bot.edit_message_text(text, reply_markup=kb, chat_id=message_or_call.message.chat.id, message_id=message_or_call.message.message_id)
-    else:
-        main_bot.send_message(message_or_call.chat.id, text, reply_markup=kb)
-
-def show_admin_logs(call):
-    if not is_admin(call.from_user.id):
-        main_bot.answer_callback_query(call.id, "⛔ Unauthorized")
-        return
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT id, admin_id, admin_name, action, details, timestamp FROM audit_logs ORDER BY id DESC LIMIT 15")
-    rows = c.fetchall()
-    conn.close()
-
-    lines = ["📜 <b>ADMIN AUDIT LOGS</b>", "", "Showing latest 15 actions:", ""]
-    if not rows:
-        lines.append("No audit logs found yet.")
-    else:
-        for r in rows:
-            admin = r["admin_name"] or str(r["admin_id"])
-            details = r["details"] or "—"
-            lines.append(
-                f"<b>#{r['id']}</b> • <b>{r['action']}</b>\n"
-                f"👤 {admin} (<code>{r['admin_id']}</code>)\n"
-                f"📝 {details}\n"
-                f"🕐 {fmt_ts(r['timestamp'])}\n"
-            )
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton("🔄 REFRESH LOGS", callback_data="admin_logs"),
-        types.InlineKeyboardButton("◀️ ADMIN PANEL", callback_data="admin_dashboard"),
-    )
-    main_bot.edit_message_text("\n".join(lines), reply_markup=kb, chat_id=call.message.chat.id, message_id=call.message.message_id)
-    main_bot.answer_callback_query(call.id)
-
-def show_admin_queue(call, kind):
-    if not is_admin(call.from_user.id):
-        main_bot.answer_callback_query(call.id, "⛔ Unauthorized")
-        return
-    conn = get_db()
-    c = conn.cursor()
-    if kind == "deployments":
-        c.execute("SELECT id, user_id, file_id, status, created_at FROM deployments WHERE status='PENDING_APPROVAL' ORDER BY created_at DESC LIMIT 20")
-        rows = c.fetchall()
-        title = "🚀 <b>PENDING DEPLOYMENTS</b>"
-        if not rows:
-            body = "No pending deployment approvals."
-        else:
-            body = "\n\n".join(f"🚀 <b>{r['id']}</b>\n👤 User: <code>{r['user_id']}</code>\n📁 File ID: <code>{r['file_id']}</code>\n🕐 {fmt_ts(r['created_at'])}" for r in rows)
-    else:
-        c.execute("SELECT id, user_id, plan_id, amount, utr, status, created_at FROM payments WHERE status='PENDING' ORDER BY created_at DESC LIMIT 20")
-        rows = c.fetchall()
-        title = "💳 <b>PENDING PAYMENTS</b>"
-        if not rows:
-            body = "No pending payment approvals."
-        else:
-            body = "\n\n".join(f"💳 <b>{r['id']}</b>\n👤 User: <code>{r['user_id']}</code>\n📦 Plan: {r['plan_id']}\n💰 Amount: ₹{r['amount']}\n🔢 UTR: <code>{r['utr']}</code>\n🕐 {fmt_ts(r['created_at'])}" for r in rows)
-    conn.close()
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton("◀️ ADMIN PANEL", callback_data="admin_dashboard"),
-        types.InlineKeyboardButton("📜 LOGS", callback_data="admin_logs"),
-    )
-    main_bot.edit_message_text(title + "\n\n" + body, reply_markup=kb, chat_id=call.message.chat.id, message_id=call.message.message_id)
-    main_bot.answer_callback_query(call.id)
 
 # ---------- OTHER TEXT ----------
 @main_bot.message_handler(func=lambda m: True)
@@ -1521,7 +1271,7 @@ def main_callback(call):
             main_bot.send_message(
                 call.message.chat.id,
                 "Choose an option:",
-                reply_markup=main_menu_kb(call.from_user.id)
+                reply_markup=main_menu_kb()
             )
 
         elif data == "menu_files":
@@ -1555,29 +1305,6 @@ def main_callback(call):
         elif data == "menu_about":
             main_bot.answer_callback_query(call.id)
             show_about(call)
-
-        elif data == "admin_dashboard":
-            if not is_admin(user.id):
-                main_bot.answer_callback_query(call.id, "⛔ Unauthorized")
-                return
-            main_bot.answer_callback_query(call.id)
-            show_admin_panel(call)
-
-        elif data == "admin_refresh":
-            if not is_admin(user.id):
-                main_bot.answer_callback_query(call.id, "⛔ Unauthorized")
-                return
-            main_bot.answer_callback_query(call.id, "🔄 Refreshed")
-            show_admin_panel(call)
-
-        elif data == "admin_logs":
-            show_admin_logs(call)
-
-        elif data == "admin_deployments":
-            show_admin_queue(call, "deployments")
-
-        elif data == "admin_payments":
-            show_admin_queue(call, "payments")
 
         elif data == "menu_hosting":
             main_bot.answer_callback_query(call.id)
@@ -2064,7 +1791,7 @@ def _extract_zip_safe(zip_path, destination):
         if len(infos) > HOSTING_MAX_ZIP_FILES:
             raise ValueError("ZIP contains too many files.")
         total = sum(max(0, i.file_size) for i in infos)
-        if HOSTING_MAX_ZIP_UNCOMPRESSED_MB is not None and total > HOSTING_MAX_ZIP_UNCOMPRESSED_MB * 1024 * 1024:
+        if total > HOSTING_MAX_ZIP_UNCOMPRESSED_MB * 1024 * 1024:
             raise ValueError("ZIP expands beyond the allowed limit.")
         for member in infos:
             name = member.filename.replace("\\", "/")
@@ -2141,8 +1868,6 @@ def start_hosting(deploy_id):
             env=env,
             shell=False,
             start_new_session=(os.name == "posix"),
-            # Railway/container-safe: do not use preexec_fn (can raise SubprocessError).
-            preexec_fn=None,
             bufsize=1,
             close_fds=True,
         )
@@ -2480,17 +2205,27 @@ def buy_plan(call, plan_id):
         main_bot.answer_callback_query(call.id, "Plan not found")
         return
     amount = plan["price"]
-    qr_img = generate_upi_qr(amount, UPI_ID, reference=plan_id)
+    try:
+        qr_img = generate_upi_qr(amount, UPI_ID, reference=plan_id)
+    except Exception as exc:
+        logger.exception("QR generation failed")
+        main_bot.answer_callback_query(call.id, "⚠️ Payment QR is not configured", show_alert=True)
+        return
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("🧾 I HAVE PAID — SUBMIT UTR + SCREENSHOT", callback_data=f"paid_{plan_id}"))
+    kb.add(types.InlineKeyboardButton("◀️ BACK", callback_data="menu_main"))
     main_bot.send_photo(call.message.chat.id, qr_img, caption=f"""
 <b>{BRAND}</b>
 
-SCAN & PAY
+💳 <b>PAYMENT QR</b>
+━━━━━━━━━━━━━━━━━━
+📦 Plan: <b>{plan['name']}</b>
+💰 Amount: <b>₹{amount}</b>
+🏦 UPI: <code>{html.escape(UPI_ID)}</code>
 
-Plan: {plan['name']}
-Amount: ₹{amount}
-""", reply_markup=types.InlineKeyboardMarkup().add(
-        types.InlineKeyboardButton("🧾 I HAVE PAID", callback_data=f"paid_{plan_id}")
-    ))
+After payment, submit <b>both</b> your UTR and successful payment screenshot.
+━━━━━━━━━━━━━━━━━━
+""", reply_markup=kb)
     main_bot.answer_callback_query(call.id)
 
 def paid_flow(call, plan_id):
@@ -2499,7 +2234,11 @@ def paid_flow(call, plan_id):
     main_bot.register_next_step_handler(call.message, get_utr, plan_id)
 
 def get_utr(message, plan_id):
-    utr = message.text.strip()
+    utr = (message.text or "").strip()
+    if not re.fullmatch(r"\d{12}", utr):
+        main_bot.reply_to(message, "❌ Invalid UTR. Please send the 12-digit UTR / Transaction ID.")
+        main_bot.register_next_step_handler(message, get_utr, plan_id)
+        return
     # Basic duplicate check
     conn = get_db()
     c = conn.cursor()
@@ -2525,11 +2264,23 @@ def get_proof(message, plan_id, utr):
     plan = c.fetchone()
     amount = plan["price"] if plan else 0
     pay_id = generate_id("VOLT-PAY")
-    c.execute(
-        "INSERT INTO payments (id, user_id, plan_id, amount, utr, proof_file_id, status) VALUES (?,?,?,?,?,?,?)",
-        (pay_id, user.id, plan_id, amount, utr, proof_file_id, "PENDING")
-    )
-    conn.commit()
+    try:
+        c.execute(
+            "INSERT INTO payments (id, user_id, plan_id, amount, utr, proof_file_id, status) VALUES (?,?,?,?,?,?,?)",
+            (pay_id, user.id, plan_id, amount, utr, proof_file_id, "PENDING")
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        conn.close()
+        main_bot.reply_to(message, "⚠️ This UTR has already been submitted. Please check your UTR.")
+        return
+    except Exception:
+        conn.rollback()
+        conn.close()
+        logger.exception("Payment submission failed")
+        main_bot.reply_to(message, "❌ Payment submission failed temporarily. Please try again.")
+        return
     conn.close()
     log_audit(user.id, user.first_name or "User", "PAYMENT_SUBMIT", f"Payment {pay_id} submitted")
 
@@ -2548,9 +2299,19 @@ def get_proof(message, plan_id, utr):
 🧾 UTR: {utr}
 🟡 Status: PENDING
 """
-    main_bot.send_message(OWNER_ID, admin_text, reply_markup=kb)
-    main_bot.send_message(CO_OWNER_ID, admin_text, reply_markup=kb)
-    main_bot.reply_to(message, "🧾 Payment submitted. Awaiting admin approval.")
+    # Send the actual screenshot to both admins, not just the file_id.
+    for admin_id in (OWNER_ID, CO_OWNER_ID):
+        if not admin_id:
+            continue
+        try:
+            main_bot.send_photo(admin_id, proof_file_id, caption=admin_text, reply_markup=kb)
+        except Exception:
+            logger.exception("Failed to notify admin %s about payment %s", admin_id, pay_id)
+            try:
+                main_bot.send_message(admin_id, admin_text, reply_markup=kb)
+            except Exception:
+                pass
+    main_bot.reply_to(message, "🧾 Payment submitted. UTR + screenshot received. Awaiting admin approval.")
 
 def admin_pay_callback(call):
     if not is_admin(call.from_user.id):
@@ -2627,6 +2388,10 @@ def activate_subscription(payment_id, admin_id):
 
     user_id = pay["user_id"]
     plan_id = pay["plan_id"]
+    c.execute("SELECT id FROM receipts WHERE payment_id=? LIMIT 1", (payment_id,))
+    if c.fetchone():
+        conn.close()
+        return
     c.execute("SELECT * FROM plans WHERE id=?", (plan_id,))
     plan = c.fetchone()
     if not plan:
@@ -2965,13 +2730,7 @@ def ticket_reply_text(message, ticket_id):
     if sender_type == "ADMIN":
         c.execute("UPDATE tickets SET status='IN_PROGRESS' WHERE status='OPEN' AND id=?", (ticket_id,))
     conn.commit()
-    conn.close()
-    log_audit(user.id, user.first_name, "TICKET_REPLY", f"Replied to {ticket_id}")
-    main_bot.send_message(message.chat.id, "Reply sent.")
-    # Notify admins if user replied
-    if sender_type == "USER":
-        main_bot.send_message(OWNER_ID, f"New reply on ticket {ticket_id} by {user.first_name}")
-        main_bot.send_message(CO_OWNER_ID, f"New reply on ticket {ticket_id} by {user.first_name}")
+    log_audit(admin_id, "Admin", "PAYMENT_ACTIVATE", f"Activated subscription for payment {payment_id}")
 
 # ==========================
 #  QR CODE GENERATION
@@ -3425,6 +3184,11 @@ def shutdown(signum=None, frame=None):
 #  MAIN
 # ==========================
 def main():
+    # Validate required control-plane configuration before starting workers.
+    if not OWNER_ID or not CO_OWNER_ID:
+        raise RuntimeError("OWNER_ID and CO_OWNER_ID environment variables are required.")
+    if not OWNER_ID or not CO_OWNER_ID:
+        raise RuntimeError("OWNER_ID and CO_OWNER_ID environment variables are required.")
     # Initialize DB
     init_db()
 
@@ -3433,7 +3197,7 @@ def main():
     if not PAY_BOT_TOKEN:
         logger.warning("PAY_BOT_TOKEN is not set; payment admin bot will not be started.")
     # Ensure sandbox dir
-    SANDBOX_ROOT.mkdir(exist_ok=True)
+    SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
 
     # Start background workers
     threading.Thread(target=expiry_checker, daemon=True).start()
@@ -3442,25 +3206,13 @@ def main():
     # Start bots with isolated retry loops. A temporary Telegram/network error
     # must not kill the entire hosting service.
     def run_bot(bot, name):
-        # Resilient polling loop: temporary Telegram/network failures do not
-        # terminate the service. Backoff prevents a tight crash/retry loop.
-        retry_delay = 5
         while True:
             try:
                 logger.info("%s polling started", name)
                 bot.infinity_polling(timeout=30, long_polling_timeout=30, skip_pending=True)
-                retry_delay = 5
-            except Exception as exc:
-                message = str(exc)
-                if "409" in message and "getUpdates" in message:
-                    logger.error(
-                        "%s polling conflict (409): another instance is using this bot token. "
-                        "Waiting %ss before retry.", name, retry_delay
-                    )
-                else:
-                    logger.exception("%s polling stopped; retrying in %ss", name, retry_delay)
-                time.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 60)
+            except Exception:
+                logger.exception("%s polling stopped; retrying in 5 seconds", name)
+                time.sleep(5)
 
     threading.Thread(target=run_bot, args=(main_bot, "MAIN BOT"), daemon=True).start()
     if DB_BOT_TOKEN:
@@ -3469,7 +3221,7 @@ def main():
         threading.Thread(target=run_bot, args=(pay_bot, "PAY BOT"), daemon=True).start()
 
     logger.info(f"{BRAND} started. Version {BRAND_VER}.")
-    logger.info("Owner/Co-Owner admin configuration loaded from Railway Variables (IDs are not logged).")
+    logger.info(f"Owner ID: {OWNER_ID}, Co-Owner ID: {CO_OWNER_ID}")
 
     # Register signal handlers
     signal.signal(signal.SIGINT, shutdown)
@@ -3497,3 +3249,6 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         shutdown()
+    except Exception:
+        logger.exception("Fatal VOLT HOSTING error")
+        raise
