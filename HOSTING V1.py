@@ -67,22 +67,19 @@ OWNER_ID = _env_int("OWNER_ID")
 CO_OWNER_ID = _env_int("CO_OWNER_ID")
 OWNER_USERNAME = os.environ.get("OWNER_USERNAME", "").strip().lstrip("@")
 CO_OWNER_USERNAME = os.environ.get("CO_OWNER_USERNAME", "").strip().lstrip("@")
-UPI_ID = os.environ.get("UPI_ID", "").strip()
+UPI_ID = os.environ.get("UPI_ID", "abhirajkathole60@okicici").strip()
 UPI_LOGO = ""  # optional path to logo
 
 # Branding
 BRAND = "VOLT ⚡ HOSTING"
-BRAND_VER = "V12.09.111 • V5 ULTRA"
+BRAND_VER = "V12.09.111"
 STUDIO = "VOLT ⚡ STUDIO"
 FOOTER = f"\n© 2026 {STUDIO}\nAll Rights Reserved."
 
 # Database
-DB_PATH = os.environ.get(
-    "DATABASE_URL",
-    "/data/volthosting.db" if Path("/data").exists() else "volthosting.db"
-)
+DB_PATH = os.environ.get("DATABASE_URL", "volthosting.db")
 if DB_PATH.startswith("sqlite:///"):
-    DB_PATH = DB_PATH.replace("sqlite:///", "", 1)
+    DB_PATH = DB_PATH.replace("sqlite:///", "")
 try:
     _db_parent = os.path.dirname(os.path.abspath(DB_PATH))
     if _db_parent:
@@ -107,7 +104,7 @@ RATE_LIMITS = {
     'ticket': (2, 300),
     'callback': (30, 60),
 }
-SANDBOX_ROOT = Path(os.environ.get("SANDBOX_ROOT", "/data/sandbox" if Path("/data").exists() else "./sandbox")).expanduser().resolve()
+SANDBOX_ROOT = Path("./sandbox").resolve()
 HOSTING_MAX_CPU_SECONDS = int(os.environ.get("HOSTING_MAX_CPU_SECONDS", "300"))
 HOSTING_MAX_MEMORY_MB = int(os.environ.get("HOSTING_MAX_MEMORY_MB", "512"))
 HOSTING_MAX_PROCESSES = int(os.environ.get("HOSTING_MAX_PROCESSES", "64"))
@@ -304,8 +301,6 @@ def init_db():
             rejected_reason TEXT,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_utr_unique
-        ON payments(utr) WHERE utr IS NOT NULL AND utr <> '';
         CREATE TABLE IF NOT EXISTS receipts (
             id TEXT PRIMARY KEY,
             payment_id TEXT,
@@ -705,30 +700,34 @@ def volt_back_button():
     return volt_button("↩️ BACK", "menu_main")
 
 def volt_dashboard_markup(uid):
+    """V5 ULTRA user dashboard. No legacy V12 menu buttons."""
     rows = [
+        [volt_button("📤 UPLOAD FILE", "text_upload"),
+         volt_button("📁 MY FILES", "menu_files")],
         [volt_button("🚀 DEPLOYMENT", "menu_deploy"),
-         volt_button("📊 ANALYTICS", "menu_stats")],
-        [volt_button("👤 ACCOUNT", "menu_account"),
-         volt_button("💎 PREMIUM", "menu_buy")],
-        [volt_button("📁 MY FILES", "menu_files"),
+         volt_button("🚀 MY HOSTING", "menu_hosting")],
+        [volt_button("📊 ANALYTICS", "menu_stats"),
+         volt_button("👤 ACCOUNT", "menu_account")],
+        [volt_button("💎 PREMIUM", "menu_buy"),
          volt_button("🎫 SUPPORT", "menu_support")],
         [volt_button("ℹ️ ABOUT VOLT", "menu_about"),
          volt_button("⚡ BOT SPEED", "menu_speed")],
     ]
     if is_admin(uid):
-        rows.append([volt_button("👑 CONTROL CENTER", "admin_dashboard")])
-    rows.append([volt_button("🏠 MAIN MENU", "menu_main")])
+        rows.append([volt_button("👑 V5 CONTROL CENTER", "admin_dashboard")])
     return types.InlineKeyboardMarkup(rows)
 
 def volt_owner_markup():
+    """Clean V5 ULTRA admin UI; legacy V12 admin controls are intentionally excluded."""
     return types.InlineKeyboardMarkup([
-        [volt_button("👥 USERS", "admin_dashboard"),
-         volt_button("📁 FILES", "admin_deployments")],
-        [volt_button("🚀 DEPLOYMENTS", "admin_deployments"),
-         volt_button("💳 PAYMENTS", "admin_payments")],
-        [volt_button("🛡️ AUDIT LOGS", "admin_logs"),
-         volt_button("🔄 REFRESH", "admin_refresh")],
-        [volt_button("🏠 MAIN MENU", "menu_main")],
+        [volt_button("📊 OVERVIEW", "admin_refresh"),
+         volt_button("👥 USERS", "admin_users")],
+        [volt_button("📁 FILES", "admin_files"),
+         volt_button("🚀 DEPLOYMENTS", "admin_deployments")],
+        [volt_button("💳 PAYMENTS", "admin_payments"),
+         volt_button("📜 AUDIT LOGS", "admin_logs")],
+        [volt_button("🔄 REFRESH", "admin_refresh"),
+         volt_button("🏠 MAIN MENU", "menu_main")],
     ])
 
 
@@ -736,27 +735,22 @@ def volt_owner_markup():
 #  KEYBOARDS
 # ==========================
 def main_menu_kb(user_id=None):
-    """Screenshot-1 options rendered in screenshot-2 style: a compact 2-column reply keyboard."""
+    """V5 ULTRA premium reply keyboard matching the inline dashboard UI."""
     kb = types.ReplyKeyboardMarkup(
         resize_keyboard=True,
         row_width=2,
         selective=False,
-        input_field_placeholder="Choose an option…",
+        input_field_placeholder="⚡ Choose VOLT option…",
     )
     rows = [
-        ("📤 𝐔𝐏𝐋𝐎𝐀𝐃 𝐅𝐈𝐋𝐄", "📂 𝐌𝐘 𝐒𝐂𝐑𝐈𝐏𝐓𝐒"),
-        ("💎 𝐁𝐔𝐘 𝐏𝐑𝐄𝐌𝐈𝐔𝐌", "🚀 𝐌𝐘 𝐇𝐎𝐒𝐓𝐈𝐍𝐆"),
-        ("🛑 𝐒𝐓𝐎𝐏 𝐒𝐂𝐑𝐈𝐏𝐓", "📜 𝐕𝐈𝐄𝐖 𝐋𝐎𝐆𝐒"),
-        ("📦 𝐈𝐍𝐒𝐓𝐀𝐋𝐋", "⚡ 𝐁𝐎𝐓 𝐒𝐏𝐄𝐄𝐃"),
-        ("📊 𝐒𝐓𝐀𝐓𝐒", "❓ 𝐇𝐄𝐋𝐏"),
-        ("📞 𝐂𝐎𝐍𝐓𝐀𝐂𝐓",),
+        ("📤 UPLOAD FILE", "📁 MY FILES"),
+        ("🚀 DEPLOYMENT", "🚀 MY HOSTING"),
+        ("📊 ANALYTICS", "👤 ACCOUNT"),
+        ("💎 PREMIUM", "🎫 SUPPORT"),
+        ("ℹ️ ABOUT VOLT", "⚡ BOT SPEED"),
     ]
-    # Owner/Co-Owner only: expose Admin Panel in the reply keyboard.
-    # Authorization remains ID-based and uses Railway Variables above.
-    # `current_user_id` is attached by the start/menu handlers when available.
-    current_user_id = user_id or 0
-    if current_user_id and is_admin(current_user_id):
-        rows.append(("🛠️ 𝐀𝐃𝐌𝐈𝐍 𝐏𝐀𝐍𝐄𝐋",))
+    if user_id and is_admin(user_id):
+        rows.append(("👑 V5 CONTROL CENTER",))
     for row in rows:
         kb.row(*(types.KeyboardButton(label) for label in row))
     return kb
@@ -1022,38 +1016,6 @@ if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is required.")
 main_bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
-# ---------- V5 ULTRA START ----------
-def send_ultra_dashboard(chat_id, user, message_id=None):
-    conn = get_db()
-    try:
-        files_count = conn.execute("SELECT COUNT(*) AS cnt FROM files WHERE user_id=?", (user.id,)).fetchone()["cnt"]
-        hosting_count = conn.execute("SELECT COUNT(*) AS cnt FROM hosting WHERE user_id=? AND status='ONLINE'", (user.id,)).fetchone()["cnt"]
-        sub = conn.execute("SELECT plan_id, expiry_date FROM user_subscriptions WHERE user_id=? AND status='ACTIVE' ORDER BY expiry_date DESC LIMIT 1", (user.id,)).fetchone()
-    finally:
-        conn.close()
-    premium = "💎 ACTIVE" if sub else "○ INACTIVE"
-    expiry = fmt_ts(sub["expiry_date"]) if sub else "—"
-    username = f"@{html.escape(user.username)}" if user.username else "Not set"
-    body = (
-        f"👋 <b>Welcome, {html.escape(user.first_name or 'User')}</b>\n\n"
-        f"👤 Username: <code>{username}</code>\n"
-        f"🆔 Telegram ID: <code>{user.id}</code>\n\n"
-        f"🚀 <b>Hosting</b>     <code>{hosting_count} ONLINE</code>\n"
-        f"📁 <b>My Scripts</b>  <code>{files_count}</code>\n"
-        f"💎 <b>Premium</b>     <code>{premium}</code>\n"
-        f"⏳ <b>Expiry</b>       <code>{expiry}</code>\n\n"
-        f"<i>{VOLT_UI['tagline']}</i>"
-    )
-    text = volt_card(BRAND, body, VOLT_UI["online"])
-    kb = volt_dashboard_markup(user.id)
-    if message_id:
-        try:
-            main_bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=kb, parse_mode="HTML")
-            return
-        except Exception:
-            pass
-    main_bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
-
 # ---------- START ----------
 @main_bot.message_handler(commands=["start"])
 def cmd_start(message: types.Message):
@@ -1062,7 +1024,23 @@ def cmd_start(message: types.Message):
     user = message.from_user
     create_user(user)
     update_last_active(user.id)
-    send_ultra_dashboard(message.chat.id, user)
+    username = user.username if user.username else "Not Set"
+    text = f"""
+<b>{BRAND}</b>
+
+Welcome, {user.first_name}!
+
+👤 Username: @{username}
+
+Welcome to {BRAND}.
+
+Choose an option below:
+"""
+    main_bot.send_message(
+        message.chat.id,
+        text,
+        reply_markup=user_reply_menu_kb(user.id)
+    )
 
 # ---------- FILE UPLOAD ----------
 @main_bot.message_handler(content_types=["document"])
@@ -1562,6 +1540,60 @@ def reply_main_account(message):
 def reply_main_about(message):
     if _require_private_user(message): _send_about_message(message)
 
+# ---------- V5 ULTRA REPLY KEYBOARD ----------
+@main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() in {"🚀 DEPLOYMENT"})
+def v5_keyboard_deployment(message):
+    if _require_private_user(message): _send_deploy_menu(message)
+
+@main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() in {"📊 ANALYTICS"})
+def v5_keyboard_analytics(message):
+    if _require_private_user(message): _send_stats_message(message)
+
+@main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() in {"👤 ACCOUNT"})
+def v5_keyboard_account(message):
+    if _require_private_user(message): _send_account_message(message)
+
+@main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() in {"💎 PREMIUM"})
+def v5_keyboard_premium(message):
+    if _require_private_user(message): show_buy(message)
+
+@main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() in {"📤 UPLOAD FILE"})
+def v5_keyboard_upload(message):
+    if _require_private_user(message): send_upload_prompt(message)
+
+@main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() in {"🚀 MY HOSTING"})
+def v5_keyboard_hosting(message):
+    if _require_private_user(message): _send_my_hosting_message(message)
+
+@main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() in {"📁 MY FILES"})
+def v5_keyboard_files(message):
+    if _require_private_user(message): show_my_files_message(message)
+
+@main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() in {"🎫 SUPPORT"})
+def v5_keyboard_support(message):
+    if _require_private_user(message): _send_support_message(message)
+
+@main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() in {"ℹ️ ABOUT VOLT"})
+def v5_keyboard_about(message):
+    if _require_private_user(message): _send_about_message(message)
+
+@main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() in {"⚡ BOT SPEED"})
+def v5_keyboard_speed(message):
+    if _require_private_user(message): _send_speed_message(message)
+
+@main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() in {"👑 V5 CONTROL CENTER", "👑 CONTROL CENTER"})
+def v5_keyboard_admin(message):
+    if not _require_private_user(message): return
+    if not is_admin(message.from_user.id):
+        main_bot.send_message(message.chat.id, "⛔ <b>Admin only.</b>")
+        return
+    show_admin_panel(message)
+
+@main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() in {"🏠 MAIN MENU"})
+def v5_keyboard_main(message):
+    if not _require_private_user(message): return
+    main_bot.send_message(message.chat.id, "⚡ <b>VOLT HOSTING V5 ULTRA</b>\n\nChoose an option below:", reply_markup=main_menu_kb(message.from_user.id))
+
 # ---------- COMPATIBILITY ALIASES ----------
 # These labels are accepted if an older screenshot-style keyboard is still visible
 # in a user's Telegram client. The main menu itself remains screenshot-1's options.
@@ -1593,31 +1625,24 @@ def compat_contact(message):
     if _require_private_user(message):
         _send_support_message(message)
 
-@main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() in {
-    "🛠️ ADMIN PANEL", "🛠 ADMIN PANEL", "ADMIN PANEL"
-})
-def compat_admin_panel(message):
-    if not _require_private_user(message):
-        return
-    if not is_admin(message.from_user.id):
-        main_bot.send_message(message.chat.id, "⛔ <b>Admin only.</b>")
-        return
-    show_admin_panel(message)
-
 def admin_panel_kb():
-    """Premium private admin dashboard keyboard. Every callback is admin-gated."""
+    """V5 ULTRA private admin keyboard only. No legacy V12 admin menu."""
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
-        types.InlineKeyboardButton("📊  DASHBOARD", callback_data="admin_dashboard"),
-        types.InlineKeyboardButton("📜  AUDIT LOGS", callback_data="admin_logs"),
+        types.InlineKeyboardButton("📊 OVERVIEW", callback_data="admin_refresh"),
+        types.InlineKeyboardButton("👥 USERS", callback_data="admin_users"),
     )
     kb.add(
-        types.InlineKeyboardButton("🚀  DEPLOYMENTS", callback_data="admin_deployments"),
-        types.InlineKeyboardButton("💳  PAYMENTS", callback_data="admin_payments"),
+        types.InlineKeyboardButton("📁 FILES", callback_data="admin_files"),
+        types.InlineKeyboardButton("🚀 DEPLOYMENTS", callback_data="admin_deployments"),
     )
     kb.add(
-        types.InlineKeyboardButton("🔄  REFRESH", callback_data="admin_refresh"),
-        types.InlineKeyboardButton("🏠  MAIN MENU", callback_data="menu_main"),
+        types.InlineKeyboardButton("💳 PAYMENTS", callback_data="admin_payments"),
+        types.InlineKeyboardButton("📜 AUDIT LOGS", callback_data="admin_logs"),
+    )
+    kb.add(
+        types.InlineKeyboardButton("🔄 REFRESH", callback_data="admin_refresh"),
+        types.InlineKeyboardButton("🏠 MAIN MENU", callback_data="menu_main"),
     )
     return kb
 
@@ -1626,24 +1651,20 @@ def _admin_display_name(username, fallback):
     return f"@{html.escape(value)}" if value else fallback
 
 def _admin_panel_text(users, online, pending_deployments, pending_payments):
-    owner = _admin_display_name(OWNER_USERNAME, "Configured")
-    co_owner = _admin_display_name(CO_OWNER_USERNAME, "Configured")
     return (
-        "⚡ <b>VOLT ⚡ ADMIN CENTER</b>\n"
+        "⚡ <b>VOLT CONTROL CENTER · V5 ULTRA</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "🔐 <i>Private control center • Owner &amp; Co-Owner</i>\n\n"
-        "👑 <b>OWNER</b>     " + owner + "\n"
-        "🤝 <b>CO-OWNER</b>  " + co_owner + "\n\n"
+        "<i>Private owner control • V5 ULTRA interface</i>\n\n"
         "📊 <b>LIVE SYSTEM</b>\n"
-        "┌──────────────────────┐\n"
-        f"│ 👥 Users          <b>{users}</b>\n"
-        f"│ 🟢 Online Hosting <b>{online}</b>\n"
-        f"│ 🚀 Deploy Queue   <b>{pending_deployments}</b>\n"
-        f"│ 💳 Payment Queue  <b>{pending_payments}</b>\n"
-        "└──────────────────────┘\n\n"
-        "⚡ <b>QUICK CONTROL</b>\n"
-        "Manage deployments, payments and private audit logs below.\n\n"
-        "🛡️ <i>All admin actions are ID-authorized.</i>"
+        "┌────────────────────────┐\n"
+        f"│ 👥 Users              <b>{users}</b>\n"
+        f"│ 🟢 Online Hosting     <b>{online}</b>\n"
+        f"│ 🚀 Deploy Queue       <b>{pending_deployments}</b>\n"
+        f"│ 💳 Payment Queue      <b>{pending_payments}</b>\n"
+        "└────────────────────────┘\n\n"
+        "🛡️ <b>SECURE ADMIN ACCESS</b>\n"
+        "Owner &amp; Co-Owner only · ID authorized\n\n"
+        "⚡ <b>V5 ULTRA</b> · Clean control interface"
     )
 
 def show_admin_panel(message_or_call):
@@ -1672,12 +1693,8 @@ def show_admin_panel(message_or_call):
     finally:
         conn.close()
 
-    text = volt_card(
-        "VOLT ⚡ CONTROL CENTER",
-        _admin_panel_text(users, online, pending_deployments, pending_payments),
-        "● SECURE • OWNER / CO-OWNER"
-    )
-    kb = volt_owner_markup()
+    text = _admin_panel_text(users, online, pending_deployments, pending_payments)
+    kb = admin_panel_kb()
     try:
         if hasattr(message_or_call, "message"):
             main_bot.edit_message_text(
@@ -1691,7 +1708,6 @@ def show_admin_panel(message_or_call):
     except Exception as exc:
         logger.exception("Admin panel render failed: %s", exc)
         if hasattr(message_or_call, "message"):
-            # If Telegram rejects an edit (e.g. message is unchanged), send a fresh panel instead.
             main_bot.send_message(message_or_call.message.chat.id, text, reply_markup=kb, parse_mode="HTML")
         else:
             raise
@@ -1867,7 +1883,11 @@ def main_callback(call):
 
         if data == "menu_main":
             main_bot.answer_callback_query(call.id)
-            send_ultra_dashboard(call.message.chat.id, call.from_user, call.message.message_id)
+            main_bot.send_message(
+                call.message.chat.id,
+                "Choose an option:",
+                reply_markup=main_menu_kb(call.from_user.id)
+            )
 
         elif data == "menu_files":
             main_bot.answer_callback_query(call.id)
@@ -1901,6 +1921,10 @@ def main_callback(call):
             main_bot.answer_callback_query(call.id)
             show_about(call)
 
+        elif data == "menu_speed":
+            main_bot.answer_callback_query(call.id)
+            show_bot_speed(call.message)
+
         elif data == "admin_dashboard":
             if not is_admin(user.id):
                 main_bot.answer_callback_query(call.id, "⛔ Unauthorized")
@@ -1914,6 +1938,39 @@ def main_callback(call):
                 return
             main_bot.answer_callback_query(call.id, "🔄 Refreshed")
             show_admin_panel(call)
+
+        elif data == "admin_users":
+            if not is_admin(user.id):
+                main_bot.answer_callback_query(call.id, "⛔ Unauthorized")
+                return
+            conn = get_db()
+            try:
+                total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+                active = conn.execute("SELECT COUNT(*) FROM users WHERE banned=0").fetchone()[0]
+            finally:
+                conn.close()
+            main_bot.answer_callback_query(call.id)
+            main_bot.send_message(
+                call.message.chat.id,
+                f"👥 <b>USERS · V5 ULTRA</b>\n\nTotal users: <b>{total}</b>\nActive users: <b>{active}</b>",
+                reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ BACK", callback_data="admin_dashboard")),
+            )
+
+        elif data == "admin_files":
+            if not is_admin(user.id):
+                main_bot.answer_callback_query(call.id, "⛔ Unauthorized")
+                return
+            conn = get_db()
+            try:
+                total_files = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+            finally:
+                conn.close()
+            main_bot.answer_callback_query(call.id)
+            main_bot.send_message(
+                call.message.chat.id,
+                f"📁 <b>FILES · V5 ULTRA</b>\n\nStored files: <b>{total_files}</b>",
+                reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ BACK", callback_data="admin_dashboard")),
+            )
 
         elif data == "admin_logs":
             if not is_admin(user.id):
@@ -2522,6 +2579,8 @@ def start_hosting(deploy_id):
             env=env,
             shell=False,
             start_new_session=(os.name == "posix"),
+            # Railway/container-safe: do not use preexec_fn (can raise SubprocessError).
+            preexec_fn=None,
             bufsize=1,
             close_fds=True,
         )
@@ -2879,11 +2938,8 @@ def paid_flow(call, plan_id):
     main_bot.register_next_step_handler(call.message, get_utr, plan_id)
 
 def get_utr(message, plan_id):
-    utr = (message.text or "").strip()
-    if not re.fullmatch(r"\d{12}", utr):
-        main_bot.reply_to(message, "⚠️ Invalid UTR. Please send the 12-digit UTR / Transaction ID.")
-        main_bot.register_next_step_handler(message, get_utr, plan_id)
-        return
+    utr = message.text.strip()
+    # Basic duplicate check
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT id FROM payments WHERE utr=?", (utr,))
@@ -2908,55 +2964,32 @@ def get_proof(message, plan_id, utr):
     plan = c.fetchone()
     amount = plan["price"] if plan else 0
     pay_id = generate_id("VOLT-PAY")
-    try:
-        c.execute(
-            "INSERT INTO payments (id, user_id, plan_id, amount, utr, proof_file_id, status) VALUES (?,?,?,?,?,?,?)",
-            (pay_id, user.id, plan_id, amount, utr, proof_file_id, "PENDING")
-        )
-        conn.commit()
-    except sqlite3.IntegrityError:
-        conn.rollback()
-        conn.close()
-        main_bot.reply_to(message, "⚠️ This UTR has already been submitted. Please check it and try again.")
-        return
-    except Exception:
-        conn.rollback()
-        conn.close()
-        logger.exception("Payment submission failed")
-        main_bot.reply_to(message, "❌ Payment submission failed safely. Please try again.")
-        return
+    c.execute(
+        "INSERT INTO payments (id, user_id, plan_id, amount, utr, proof_file_id, status) VALUES (?,?,?,?,?,?,?)",
+        (pay_id, user.id, plan_id, amount, utr, proof_file_id, "PENDING")
+    )
+    conn.commit()
     conn.close()
     log_audit(user.id, user.first_name or "User", "PAYMENT_SUBMIT", f"Payment {pay_id} submitted")
 
+    # Notify admins
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         types.InlineKeyboardButton("✅ APPROVE PAYMENT", callback_data=f"admin_pay_approve_{pay_id}"),
         types.InlineKeyboardButton("❌ REJECT PAYMENT", callback_data=f"admin_pay_reject_{pay_id}")
     )
     admin_text = f"""
-💳 NEW PAYMENT — V5 ULTRA
+💳 NEW PAYMENT
 
 👤 User: @{user.username or 'No Username'}
-🆔 Telegram ID: {user.id}
 📦 Plan: {plan['name']}
 💰 Amount: ₹{amount}
 🧾 UTR: {utr}
 🟡 Status: PENDING
-
-📸 Payment screenshot attached below.
 """
-    for admin_id in (OWNER_ID, CO_OWNER_ID):
-        if not admin_id:
-            continue
-        try:
-            main_bot.send_photo(admin_id, proof_file_id, caption=admin_text, reply_markup=kb)
-        except Exception:
-            logger.exception("Could not send payment proof to admin %s", admin_id)
-            try:
-                main_bot.send_message(admin_id, admin_text, reply_markup=kb)
-            except Exception:
-                logger.exception("Could not send payment fallback to admin %s", admin_id)
-    main_bot.reply_to(message, "🧾 Payment submitted. Screenshot + UTR sent for admin verification.")
+    main_bot.send_message(OWNER_ID, admin_text, reply_markup=kb)
+    main_bot.send_message(CO_OWNER_ID, admin_text, reply_markup=kb)
+    main_bot.reply_to(message, "🧾 Payment submitted. Awaiting admin approval.")
 
 def admin_pay_callback(call):
     if not is_admin(call.from_user.id):
@@ -3028,12 +3061,6 @@ def activate_subscription(payment_id, admin_id):
     c.execute("SELECT * FROM payments WHERE id=?", (payment_id,))
     pay = c.fetchone()
     if not pay or pay["status"] != "PAID":
-        conn.close()
-        return
-
-    # Prevent duplicate subscription/receipt creation if two admins press Approve.
-    c.execute("SELECT id FROM receipts WHERE payment_id=? LIMIT 1", (payment_id,))
-    if c.fetchone():
         conn.close()
         return
 
@@ -3840,15 +3867,12 @@ def main():
     # Initialize DB
     init_db()
 
-    if not OWNER_ID or not CO_OWNER_ID:
-        raise RuntimeError("OWNER_ID and CO_OWNER_ID environment variables are required.")
-
     if not DB_BOT_TOKEN:
         logger.warning("DB_BOT_TOKEN is not set; DB admin bot will not be started.")
     if not PAY_BOT_TOKEN:
         logger.warning("PAY_BOT_TOKEN is not set; payment admin bot will not be started.")
     # Ensure sandbox dir
-    SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
+    SANDBOX_ROOT.mkdir(exist_ok=True)
 
     # Start background workers
     threading.Thread(target=expiry_checker, daemon=True).start()
