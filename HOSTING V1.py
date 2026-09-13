@@ -4,30 +4,25 @@
 VOLT ⚡ HOSTING - Professional Telegram Hosting Platform
 Version: V13.00.000 · V6 ULTRA
 Powered by VOLT ⚡ STUDIO
-import datetime
-import datetime
 © 2026 VOLT ⚡ STUDIO — All Rights Reserved.
 
 Production‑ready single‑file implementation with private admin dashboard/logs and reliable hosted-process environment handling.
 """
-import o
-
+import os
 import sys
 import json
 import sqlite3
 import threading
 import subprocess
 import time
-# Python 3.12+ SQLite datetime compatibility
-sqlite3.register_adapter(
-    datetime.datetime,
-    lambda value: value.isoformat()
-)
+import datetime
 
-sqlite3.register_adapter(
-    datetime.date,
-    lambda value: value.isoformat()
-)import datetime
+# Python 3.12+: explicitly register SQLite adapters for datetime/date values.
+# This removes the deprecated default-adapter warning while preserving the
+# existing SQLite schema and ISO-compatible timestamp storage.
+sqlite3.register_adapter(datetime.datetime, lambda value: value.isoformat())
+sqlite3.register_adapter(datetime.date, lambda value: value.isoformat())
+
 import random
 import string
 import secrets
@@ -74,7 +69,7 @@ def _env_int(name, default=0):
     try:
         return int(raw)
     except (TypeError, ValueError):
-        logger.warning("Invalid integer environment variable %s; using %s", name, default)
+        logging.getLogger("VOLT").warning("Invalid integer environment variable %s; using %s", name, default)
         return default
 
 OWNER_ID = _env_int("OWNER_ID")
@@ -118,7 +113,7 @@ RATE_LIMITS = {
     'ticket': (2, 300),
     'callback': (30, 60),
 }
-SANDBOX_ROOT = Path("./sandbox").resolve()
+SANDBOX_ROOT = Path(os.environ.get("SANDBOX_ROOT", "./sandbox")).resolve()
 HOSTING_MAX_CPU_SECONDS = int(os.environ.get("HOSTING_MAX_CPU_SECONDS", "300"))
 HOSTING_MAX_MEMORY_MB = int(os.environ.get("HOSTING_MAX_MEMORY_MB", "512"))
 HOSTING_MAX_PROCESSES = int(os.environ.get("HOSTING_MAX_PROCESSES", "64"))
@@ -4586,12 +4581,17 @@ def main():
             except Exception as exc:
                 message = str(exc)
                 if "409" in message and "getUpdates" in message:
+                    # Telegram returns 409 when another process/service is polling
+                    # the same token. Back off instead of creating a tight retry
+                    # storm; the worker itself remains alive.
                     logger.error(
                         "%s polling conflict (409): another instance is using this bot token. "
-                        "Waiting %ss before retry.", name, retry_delay
+                        "Backing off %ss before retry.", name, retry_delay
                     )
-                else:
-                    logger.exception("%s polling stopped; retrying in %ss", name, retry_delay)
+                    time.sleep(retry_delay)
+                    retry_delay = min(max(retry_delay * 2, 10), 120)
+                    continue
+                logger.exception("%s polling stopped; retrying in %ss", name, retry_delay)
                 time.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, 60)
 
@@ -4612,6 +4612,7 @@ def main():
     start_unique(db_bot, "DB BOT", DB_BOT_TOKEN)
     start_unique(pay_bot, "PAY BOT", PAY_BOT_TOKEN)
 
+    logger.info("Polling workers initialized; Telegram 409 conflicts are handled with exponential backoff.")
     logger.info(f"{BRAND} started. Version {BRAND_VER}.")
     logger.info("Owner/Co-Owner admin configuration loaded from Railway Variables (IDs are not logged).")
 
