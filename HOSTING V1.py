@@ -4,18 +4,30 @@
 VOLT ⚡ HOSTING - Professional Telegram Hosting Platform
 Version: V13.00.000 · V6 ULTRA
 Powered by VOLT ⚡ STUDIO
+import datetime
+import datetime
 © 2026 VOLT ⚡ STUDIO — All Rights Reserved.
 
 Production‑ready single‑file implementation with private admin dashboard/logs and reliable hosted-process environment handling.
 """
-import os
+import o
+
 import sys
 import json
 import sqlite3
 import threading
 import subprocess
 import time
-import datetime
+# Python 3.12+ SQLite datetime compatibility
+sqlite3.register_adapter(
+    datetime.datetime,
+    lambda value: value.isoformat()
+)
+
+sqlite3.register_adapter(
+    datetime.date,
+    lambda value: value.isoformat()
+)import datetime
 import random
 import string
 import secrets
