@@ -941,7 +941,7 @@ def show_file_detail(call, file_id):
         ).fetchone()
     conn.close()
 
-    status = str(host["status"]).upper() if host else (str(dep["status"]).upper() if dep else "STOPPED")
+    status = str(host["status"]).upper() if host else "STOPPED"
     emoji = "🟢" if status == "ONLINE" else "⚪"
     uptime = "—"
     if host and host["started_at"] and status == "ONLINE":
@@ -982,149 +982,62 @@ def show_file_detail(call, file_id):
         main_bot.send_message(call.message.chat.id, text, reply_markup=kb)
 
 
-def _log_view_kb(file_id: int, offset: int, total: int):
-    """Build a compact public-user log viewer navigation keyboard."""
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    buttons = []
-    if offset > 0:
-        buttons.append(types.InlineKeyboardButton("⬅️ PREVIOUS", callback_data=f"file_logs_{file_id}_{max(0, offset-3200)}"))
-    if offset + 3200 < total:
-        buttons.append(types.InlineKeyboardButton("NEXT ➡️", callback_data=f"file_logs_{file_id}_{offset+3200}"))
-    if buttons:
-        kb.add(*buttons)
-    kb.add(
-        types.InlineKeyboardButton("🔄 REFRESH LOGS", callback_data=f"file_logs_{file_id}_{offset}"),
-        types.InlineKeyboardButton("⬅️ BACK TO FILE", callback_data=f"file_open_{file_id}"),
-    )
-    return kb
-
-
-def show_user_file_logs(call, file_id, offset=None):
-    """Premium public-user log viewer.
-
-    Important: logs are keyed to the latest deployment for the user's file,
-    not only to an existing hosting row. This means a process that crashes
-    during its first 0.8s startup window still leaves readable logs for the
-    public user.
-    """
+def show_user_file_logs(call, file_id):
+    """Show runtime logs for the user's own file only."""
     user = call.from_user
-    try:
-        file_id = int(file_id)
-    except (TypeError, ValueError):
-        main_bot.answer_callback_query(call.id, "⛔ Invalid file")
-        return
-
     conn = get_db()
-    file_row = conn.execute(
-        "SELECT id, name, user_id, size FROM files WHERE id=? AND user_id=?",
+    row = conn.execute(
+        "SELECT id, name, user_id FROM files WHERE id=? AND user_id=?",
         (file_id, user.id)
     ).fetchone()
-    if not file_row:
-        conn.close()
-        main_bot.answer_callback_query(call.id, "⛔ Not your file")
-        return
-
-    # Prefer the latest hosting row, but always fall back to the latest deployment.
     host = conn.execute(
-        "SELECT id, deployment_id, status, process_id FROM hosting "
-        "WHERE user_id=? AND deployment_id IN (SELECT id FROM deployments WHERE file_id=?) "
+        "SELECT deployment_id, user_id FROM hosting WHERE user_id=? AND deployment_id IN "
+        "(SELECT id FROM deployments WHERE file_id=?) "
         "ORDER BY started_at DESC LIMIT 1",
         (user.id, file_id)
     ).fetchone()
-    dep = conn.execute(
-        "SELECT id, status, runtime, start_command, created_at FROM deployments "
-        "WHERE file_id=? AND user_id=? ORDER BY created_at DESC LIMIT 1",
-        (file_id, user.id)
-    ).fetchone()
     conn.close()
 
-    deployment_id = host["deployment_id"] if host else (dep["id"] if dep else None)
-    if not deployment_id:
+    if not row:
+        main_bot.answer_callback_query(call.id, "⛔ Not your file")
+        return
+    if not host:
         main_bot.answer_callback_query(call.id, "📜 No deployment logs yet")
         main_bot.send_message(
             call.message.chat.id,
-            f"📜 <b>LOGS — {html.escape(str(file_row['name']))}</b>\n\n"
-            "No deployment has been created for this file yet."
+            f"📜 <b>Logs for {html.escape(str(row['name']))}</b>\n\n"
+            "No hosting run has been created for this file yet."
         )
         return
 
-    log_path = SANDBOX_ROOT / str(user.id) / f"deploy_{deployment_id}" / "output.log"
+    log_path = SANDBOX_ROOT / str(user.id) / f"deploy_{host['deployment_id']}" / "output.log"
     if not log_path.exists():
-        main_bot.answer_callback_query(call.id, "📜 Logs not available yet")
+        main_bot.answer_callback_query(call.id, "📜 No log file")
         main_bot.send_message(
             call.message.chat.id,
-            f"📜 <b>LOGS — {html.escape(str(file_row['name']))}</b>\n\n"
-            f"🆔 Deployment: <code>{html.escape(str(deployment_id))}</code>\n"
-            "⏳ The log file has not been created yet. Try Refresh Logs in a moment."
+            f"📜 <b>Logs for {html.escape(str(row['name']))}</b>\n\nNo log file found."
         )
         return
 
-    try:
-        raw = log_path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        main_bot.answer_callback_query(call.id, "❌ Cannot read logs")
-        main_bot.send_message(
-            call.message.chat.id,
-            f"❌ <b>LOG READ ERROR</b>\n\n<code>{html.escape(str(exc))[:900]}</code>"
-        )
-        return
-
-    if not raw.strip():
-        main_bot.answer_callback_query(call.id, "📜 Logs are empty")
-        main_bot.send_message(
-            call.message.chat.id,
-            f"📜 <b>LOGS — {html.escape(str(file_row['name']))}</b>\n\n"
-            "The deployment has started, but no output has been written yet."
-        )
-        return
-
-    total = len(raw)
-    page_size = 3200
-    # Default to the newest page so users immediately see the latest error/output.
-    if offset is None:
-        offset = max(0, total - page_size)
-    try:
-        offset = max(0, min(int(offset), max(0, total - 1)))
-    except (TypeError, ValueError):
-        offset = max(0, total - page_size)
-    chunk = raw[offset:offset + page_size]
-
-    status = str(host["status"] if host else (dep["status"] if dep else "UNKNOWN")).upper()
-    status_icon = {
-        "ONLINE": "🟢", "STOPPED": "⚪", "CRASHED": "🔴",
-        "FAILED": "🔴", "APPROVED": "🟡", "PENDING_APPROVAL": "🟡",
-    }.get(status, "⚪")
-
-    header = (
-        f"📜 <b>LOGS — {html.escape(str(file_row['name']))}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🆔 <b>Deployment:</b> <code>{html.escape(str(deployment_id))}</code>\n"
-        f"📊 <b>Status:</b> {status_icon} <b>{html.escape(status.title())}</b>\n"
-        f"📄 <b>Log size:</b> {total:,} chars\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Latest stdout / stderr / traceback:</i>\n\n"
-        f"<pre>{html.escape(chunk)}</pre>"
+    raw = log_path.read_text(encoding="utf-8", errors="replace")[-12000:]
+    main_bot.answer_callback_query(call.id, "📜 Logs opened")
+    main_bot.send_message(
+        call.message.chat.id,
+        f"📜 <b>Logs for {html.escape(str(row['name']))}</b>\n\n"
+        "<i>Latest stdout / stderr / traceback:</i>"
     )
-
-    main_bot.answer_callback_query(call.id, "📜 Logs refreshed")
-    try:
-        main_bot.edit_message_text(
-            header,
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            reply_markup=_log_view_kb(file_id, offset, total),
-            parse_mode="HTML",
-            disable_web_page_preview=True,
+    for i in range(0, len(raw), 1800):
+        try:
+            main_bot.send_message(call.message.chat.id, f"<pre>{html.escape(raw[i:i+1800])}</pre>")
+        except Exception:
+            main_bot.send_message(call.message.chat.id, html.escape(raw[i:i+1800])[:3000])
+    main_bot.send_message(
+        call.message.chat.id,
+        "⬅️ <b>Use the file panel to return.</b>",
+        reply_markup=types.InlineKeyboardMarkup().add(
+            types.InlineKeyboardButton("⬅️ BACK TO FILE", callback_data=f"file_open_{file_id}")
         )
-    except Exception:
-        # Callback may originate from a non-editable/old message.
-        main_bot.send_message(
-            call.message.chat.id,
-            header,
-            reply_markup=_log_view_kb(file_id, offset, total),
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
+    )
 
 
 def show_my_files_message(message):
@@ -1391,18 +1304,53 @@ def handle_document(message: types.Message):
     except Exception:
         logger.exception("Could not forward uploaded file to DB bot")
 
-    main_bot.reply_to(
-        message,
-        f"📁 <b>FILE UPLOADED</b>\n\n"
-        f"📦 Project: <code>{html.escape(final_path.name)}</code>\n"
-        f"📏 Size: <b>{len(downloaded):,} bytes</b>\n"
-        "🟢 Status: <b>STORED</b>\n\n"
-        "Open <b>📁 MY FILES</b> and select the file to deploy/start it.",
-        reply_markup=types.InlineKeyboardMarkup(row_width=2).add(
-            types.InlineKeyboardButton("📁 MY FILES", callback_data="menu_files"),
-            types.InlineKeyboardButton("🏠 MAIN MENU", callback_data="menu_main")
+    # Deployment approval is requested automatically after upload for eligible users.
+    # The process is NEVER started here; it can only start after admin approval.
+    can_deploy = bool(is_admin(user.id) or get_user_plan(user.id))
+    if can_deploy:
+        try:
+            _create_deployment_request(user, int(file_id))
+        except Exception as e:
+            logger.exception("Automatic approval request failed for uploaded file")
+            main_bot.reply_to(
+                message,
+                f"📁 <b>FILE UPLOADED</b>\n\n"
+                f"📦 Project: <code>{html.escape(final_path.name)}</code>\n"
+                f"📏 Size: <b>{len(downloaded):,} bytes</b>\n"
+                "🟢 Status: <b>STORED</b>\n\n"
+                f"⚠️ <b>Approval request could not be created:</b> <code>{html.escape(str(e)[:500])}</code>",
+                reply_markup=types.InlineKeyboardMarkup(row_width=2).add(
+                    types.InlineKeyboardButton("📁 MY FILES", callback_data="menu_files"),
+                    types.InlineKeyboardButton("🏠 MAIN MENU", callback_data="menu_main")
+                )
+            )
+        else:
+            main_bot.reply_to(
+                message,
+                f"📁 <b>FILE UPLOADED</b>\n\n"
+                f"📦 Project: <code>{html.escape(final_path.name)}</code>\n"
+                f"📏 Size: <b>{len(downloaded):,} bytes</b>\n"
+                "🟡 Status: <b>PENDING APPROVAL</b>\n\n"
+                "👑 Approval request has been sent to the Owner / Co-Owner.\n"
+                "🚀 Hosting will start automatically only after approval.",
+                reply_markup=types.InlineKeyboardMarkup(row_width=2).add(
+                    types.InlineKeyboardButton("📁 MY FILES", callback_data="menu_files"),
+                    types.InlineKeyboardButton("🏠 MAIN MENU", callback_data="menu_main")
+                )
+            )
+    else:
+        main_bot.reply_to(
+            message,
+            f"📁 <b>FILE UPLOADED</b>\n\n"
+            f"📦 Project: <code>{html.escape(final_path.name)}</code>\n"
+            f"📏 Size: <b>{len(downloaded):,} bytes</b>\n"
+            "🟢 Status: <b>STORED</b>\n\n"
+            "💎 Activate a hosting plan to request deployment approval.",
+            reply_markup=types.InlineKeyboardMarkup(row_width=2).add(
+                types.InlineKeyboardButton("📁 MY FILES", callback_data="menu_files"),
+                types.InlineKeyboardButton("💎 PREMIUM", callback_data="menu_buy")
+            )
         )
-    )
 
 # ---------- REPLY KEYBOARD BUTTONS ----------
 @main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() in {
@@ -1963,67 +1911,12 @@ def _admin_count(conn, sql, args=()):
     return conn.execute(sql, args).fetchone()[0]
 
 def admin_pending_page(call):
-    """Show an actionable pending queue so approvals/rejections are always visible."""
-    if not is_admin(call.from_user.id):
-        main_bot.answer_callback_query(call.id, "⛔ Admin access required")
-        return
-    conn = get_db()
+    conn=get_db()
     try:
-        deployments = conn.execute(
-            "SELECT id, user_id, file_id, status, created_at FROM deployments "
-            "WHERE status='PENDING_APPROVAL' ORDER BY created_at DESC LIMIT 20"
-        ).fetchall()
-        payments = conn.execute(
-            "SELECT id, user_id, plan_id, amount, utr, status, created_at FROM payments "
-            "WHERE status='PENDING' ORDER BY created_at DESC LIMIT 20"
-        ).fetchall()
-    finally:
-        conn.close()
-
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    blocks = []
-    for r in deployments:
-        fname = html.escape(get_file_name(r["file_id"]))
-        blocks.append(
-            f"🚀 <b>DEPLOYMENT {html.escape(str(r['id']))}</b>\n"
-            f"👤 User: <code>{r['user_id']}</code>\n"
-            f"📁 File: <code>{fname}</code>\n"
-            f"🕐 {fmt_ts(r['created_at'])}"
-        )
-        kb.add(
-            types.InlineKeyboardButton("✅ APPROVE", callback_data=f"admin_deploy_approve_{r['id']}"),
-            types.InlineKeyboardButton("❌ REJECT", callback_data=f"admin_deploy_reject_{r['id']}")
-        )
-
-    for r in payments:
-        blocks.append(
-            f"💳 <b>PAYMENT {html.escape(str(r['id']))}</b>\n"
-            f"👤 User: <code>{r['user_id']}</code>\n"
-            f"📦 Plan: {html.escape(str(r['plan_id']))} · ₹{html.escape(str(r['amount']))}\n"
-            f"🔢 UTR: <code>{html.escape(str(r['utr']))}</code>\n"
-            f"🕐 {fmt_ts(r['created_at'])}"
-        )
-        kb.add(
-            types.InlineKeyboardButton("✅ APPROVE PAYMENT", callback_data=f"admin_pay_approve_{r['id']}"),
-            types.InlineKeyboardButton("❌ REJECT PAYMENT", callback_data=f"admin_pay_reject_{r['id']}")
-        )
-
-    body = "\n\n━━━━━━━━━━━━━━━━━━━━\n\n".join(blocks) if blocks else "<i>Nothing is waiting for approval.</i>\n\n✅ All clear."
-    kb.add(
-        types.InlineKeyboardButton("🚀 DEPLOYMENTS", callback_data="admin_deployments"),
-        types.InlineKeyboardButton("💳 PAYMENTS", callback_data="admin_payments"),
-    )
-    kb.add(
-        types.InlineKeyboardButton("🔄 REFRESH", callback_data="admin_pending"),
-        types.InlineKeyboardButton("◀️ ADMIN CENTER", callback_data="admin_dashboard"),
-    )
-    text = "⏳ <b>PENDING APPROVALS</b>\n━━━━━━━━━━━━━━━━━━━━\n\n" + body
-    try:
-        main_bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id,
-                                   reply_markup=kb, parse_mode="HTML")
-    except Exception:
-        main_bot.send_message(call.message.chat.id, text, reply_markup=kb, parse_mode="HTML")
-    main_bot.answer_callback_query(call.id, "⏳ Pending approvals loaded")
+        pd=_admin_count(conn,"SELECT COUNT(*) FROM deployments WHERE status='PENDING_APPROVAL'")
+        pp=_admin_count(conn,"SELECT COUNT(*) FROM payments WHERE status='PENDING'")
+    finally: conn.close()
+    _admin_simple_page(call,"⏳ <b>PENDING QUEUE</b>",f"🚀 Deployments pending: <b>{pd}</b>\n💳 Payments pending: <b>{pp}</b>","admin_pending")
 
 def admin_statistics_page(call):
     conn=get_db()
@@ -2527,7 +2420,7 @@ def main_callback(call):
         elif data == "admin_export_users":
             if not is_admin(user.id): main_bot.answer_callback_query(call.id,"⛔ Unauthorized"); return
             conn=get_db()
-            try: rows=conn.execute('SELECT id,username,first_name,is_premium,is_banned FROM users ORDER BY id').fetchall()
+            try: rows=conn.execute('SELECT id,username,first_name,is_premium,banned FROM users ORDER BY id').fetchall()
             finally: conn.close()
             export_path=Path('/tmp')/f"volt_users_{user.id}.csv"
             import csv as _csv
@@ -2566,13 +2459,11 @@ def main_callback(call):
             show_file_detail(call, int(file_id))
 
         elif data.startswith("file_logs_"):
-            parts = data.split("_")
-            file_id = parts[2] if len(parts) > 2 else ""
-            offset = parts[3] if len(parts) > 3 and parts[3].isdigit() else None
+            file_id = data[len("file_logs_"):]
             if not file_id.isdigit() or not _validate_user_file_access(user.id, int(file_id)):
                 main_bot.answer_callback_query(call.id, "⛔ Not your file")
                 return
-            show_user_file_logs(call, int(file_id), int(offset) if offset is not None else None)
+            show_user_file_logs(call, int(file_id))
 
         elif data.startswith("file_start_"):
             file_id = data[len("file_start_"):]
@@ -2734,18 +2625,6 @@ def file_confirm_delete(call):
     conn.close()
     show_my_files(call)
 
-def get_file_name(file_id: int) -> str:
-    """Resolve a stored file display name safely for admin/user notifications."""
-    try:
-        conn = get_db()
-        row = conn.execute("SELECT name FROM files WHERE id=?", (int(file_id),)).fetchone()
-        conn.close()
-        if row and row["name"]:
-            return str(row["name"])
-    except Exception:
-        logger.exception("Failed to resolve file name for file_id=%s", file_id)
-    return f"file_{int(file_id)}"
-
 def _infer_start_command(file_path: Path, original_name: str) -> str:
     """Automatically choose a safe start command; users do not enter startup settings."""
     ext = file_path.suffix.lower()
@@ -2767,118 +2646,28 @@ def _infer_start_command(file_path: Path, original_name: str) -> str:
         # Static/text projects are served automatically on Railway's PORT.
         return "python3 -m http.server $PORT"
     if ext == ".zip":
-        # Inspect the archive before approval so valid projects reach the admin queue.
+        # Pick a conventional entry point from the archive.
         import zipfile
         try:
             with zipfile.ZipFile(file_path) as zf:
-                files = [n for n in zf.namelist() if not n.endswith("/")]
-                normalized = {Path(n).name.lower(): n for n in files}
-                if "package.json" in normalized:
-                    try:
-                        pkg = json.loads(zf.read(normalized["package.json"]).decode("utf-8", errors="replace"))
-                        scripts = pkg.get("scripts") or {}
-                        if scripts.get("start"):
-                            return "npm start"
-                        if pkg.get("main"):
-                            return f"node {shlex.quote(str(pkg['main']))}"
-                    except Exception:
-                        pass
-                preferred = ["bot.py", "main.py", "app.py", "run.py", "index.py", "server.py",
-                             "bot.js", "main.js", "app.js", "index.js", "server.js", "start.sh"]
-                for candidate in preferred:
-                    if candidate in normalized:
-                        chosen = normalized[candidate]
-                        if chosen.lower().endswith(".py"):
-                            return f"python3 {shlex.quote(chosen)}"
-                        if chosen.lower().endswith(".js"):
-                            return f"node {shlex.quote(chosen)}"
-                        if chosen.lower().endswith(".sh"):
-                            return f"bash {shlex.quote(chosen)}"
-                code_files = [n for n in files if Path(n).suffix.lower() in {".py", ".js", ".sh"}]
-                if len(code_files) == 1:
-                    chosen = code_files[0]
+                files = [n for n in zf.namelist() if not n.endswith("/") and "/" not in n.strip("/")]
+            preferred = ["bot.py", "main.py", "app.py", "run.py", "index.py", "server.py",
+                         "bot.js", "main.js", "app.js", "index.js", "server.js", "start.sh"]
+            lower = {Path(n).name.lower(): n for n in files}
+            for candidate in preferred:
+                if candidate in lower:
+                    chosen = Path(lower[candidate]).name
                     if chosen.lower().endswith(".py"):
                         return f"python3 {shlex.quote(chosen)}"
                     if chosen.lower().endswith(".js"):
                         return f"node {shlex.quote(chosen)}"
-                    return f"bash {shlex.quote(chosen)}"
+                    if chosen.lower().endswith(".sh"):
+                        return f"bash {shlex.quote(chosen)}"
         except Exception:
-            logger.exception("ZIP startup inspection failed for %s", file_path)
-        raise ValueError("Could not automatically detect a startup file inside the ZIP. Include bot.py/main.py, package.json, or one Python/Node/Shell entry file.")
+            pass
+        raise ValueError("Could not detect a startup file inside the ZIP. Add bot.py/main.py or a supported entry file.")
     raise ValueError(f"Automatic startup is not supported for {ext or 'this file type'}.")
 
-
-def _notify_deployment_admins(deploy_id: str) -> int:
-    """Send an actionable deployment approval notification to every configured admin.
-
-    Returns the number of admins successfully notified. Failures are logged instead of
-    being silently swallowed, while the pending queue remains available as a fallback.
-    """
-    conn = get_db()
-    row = conn.execute(
-        "SELECT d.*, f.name AS file_name, f.size AS file_size FROM deployments d "
-        "LEFT JOIN files f ON f.id=d.file_id WHERE d.id=?", (deploy_id,)
-    ).fetchone()
-    conn.close()
-    if not row:
-        logger.error("Cannot notify admins: deployment %s not found", deploy_id)
-        return 0
-
-    username = "No Username"
-    try:
-        conn = get_db()
-        u = conn.execute("SELECT username, first_name FROM users WHERE id=?", (row["user_id"],)).fetchone()
-        conn.close()
-        if u and u["username"]:
-            username = str(u["username"])
-    except Exception:
-        logger.exception("Could not resolve deployment user for %s", deploy_id)
-
-    admin_text = (
-        "🚨 <b>NEW DEPLOYMENT — APPROVAL REQUIRED</b>\n\n"
-        f"👤 User: @{html.escape(username)}\n"
-        f"🆔 User ID: <code>{row['user_id']}</code>\n"
-        f"📁 File: <code>{html.escape(str(row['file_name'] or get_file_name(row['file_id'])))}</code>\n"
-        f"📦 File ID: <code>{row['file_id']}</code>\n"
-        f"🆔 Deployment: <code>{html.escape(str(deploy_id))}</code>\n"
-        "🤖 Startup: <b>Automatic detection</b>\n"
-        "🟡 Status: <b>PENDING APPROVAL</b>\n\n"
-        "👇 <b>Choose an action:</b>"
-    )
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton("✅ APPROVE", callback_data=f"admin_deploy_approve_{deploy_id}"),
-        types.InlineKeyboardButton("❌ REJECT", callback_data=f"admin_deploy_reject_{deploy_id}"),
-    )
-    kb.add(
-        types.InlineKeyboardButton("🔍 DETAILS", callback_data=f"admin_deploy_details_{deploy_id}"),
-        types.InlineKeyboardButton("📁 VIEW FILE", callback_data=f"admin_deploy_file_{deploy_id}"),
-    )
-    kb.add(types.InlineKeyboardButton("⏳ PENDING QUEUE", callback_data="admin_pending"))
-
-    notified = 0
-    admin_ids = []
-    for aid in (OWNER_ID, CO_OWNER_ID):
-        try:
-            aid = int(aid)
-        except (TypeError, ValueError):
-            continue
-        if aid > 0 and aid not in admin_ids:
-            admin_ids.append(aid)
-
-    if not admin_ids:
-        logger.error("No valid OWNER_ID/CO_OWNER_ID configured; deployment %s cannot notify admins", deploy_id)
-        return 0
-
-    for admin_id in admin_ids:
-        try:
-            main_bot.send_message(admin_id, admin_text, reply_markup=kb, parse_mode="HTML")
-            notified += 1
-            logger.info("Deployment approval notification sent: deployment=%s admin=%s", deploy_id, admin_id)
-        except Exception as exc:
-            logger.error("Deployment approval notification FAILED: deployment=%s admin=%s error=%s",
-                         deploy_id, admin_id, exc)
-    return notified
 
 def _create_deployment_request(user, file_id):
     """Create a deployment request using automatic runtime detection."""
@@ -2889,6 +2678,19 @@ def _create_deployment_request(user, file_id):
     conn.close()
     if not file_row:
         raise ValueError("File not found.")
+
+    # Prevent duplicate approval requests for the same file.
+    existing = get_db()
+    try:
+        pending = existing.execute(
+            "SELECT id FROM deployments WHERE file_id=? AND user_id=? "
+            "AND status='PENDING_APPROVAL' ORDER BY created_at DESC LIMIT 1",
+            (int(file_id), int(user.id))
+        ).fetchone()
+    finally:
+        existing.close()
+    if pending:
+        raise ValueError(f"Approval is already pending for deployment {pending['id']}.")
 
     command = _infer_start_command(Path(file_row["path"]), file_row["name"])
     # Validate only the executable/arguments that can be safely validated here.
@@ -2908,7 +2710,31 @@ def _create_deployment_request(user, file_id):
     conn.close()
     log_audit(user.id, user.first_name or "User", "DEPLOY_REQUEST", f"Deployment {deploy_id} created with auto command")
 
-    notified = _notify_deployment_admins(deploy_id)
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("✅ APPROVE", callback_data=f"admin_deploy_approve_{deploy_id}"),
+        types.InlineKeyboardButton("❌ REJECT", callback_data=f"admin_deploy_reject_{deploy_id}")
+    )
+    kb.add(
+        types.InlineKeyboardButton("🔍 DETAILS", callback_data=f"admin_deploy_details_{deploy_id}"),
+        types.InlineKeyboardButton("📁 VIEW FILE", callback_data=f"admin_deploy_file_{deploy_id}")
+    )
+    username = user.username or "No Username"
+    admin_text = (
+        "🚀 <b>NEW DEPLOYMENT REQUEST</b>\n\n"
+        f"👤 User: @{html.escape(username)}\n"
+        f"🆔 User ID: <code>{user.id}</code>\n"
+        f"📁 File ID: <code>{file_id}</code>\n"
+        f"📦 File: <code>{html.escape(get_file_name(file_id))}</code>\n"
+        "🤖 Startup: <b>Automatic detection</b>\n"
+        "🟡 Status: <b>PENDING APPROVAL</b>\n"
+        f"🕒 Created: {fmt_ts(datetime.datetime.now(datetime.timezone.utc))}"
+    )
+    for admin_id in (OWNER_ID, CO_OWNER_ID):
+        try:
+            main_bot.send_message(admin_id, admin_text, reply_markup=kb)
+        except Exception:
+            pass
 
     main_bot.send_message(
         user.id,
@@ -2997,15 +2823,44 @@ def admin_deploy_callback(call):
         if deploy["status"] != "PENDING_APPROVAL":
             main_bot.answer_callback_query(call.id, "⚠️ This action is no longer available.")
             return
-        # Confirm
-        kb = types.InlineKeyboardMarkup(row_width=2)
-        kb.add(
-            types.InlineKeyboardButton("✅ YES, APPROVE", callback_data=f"admin_deploy_confirm_{deploy_id}"),
-            types.InlineKeyboardButton("❌ CANCEL", callback_data="menu_main")
+
+        # Direct approval: no second confirmation screen.
+        conn = get_db()
+        c = conn.cursor()
+        c.execute(
+            "UPDATE deployments SET status='APPROVED', approved_by=?, approved_at=? "
+            "WHERE id=? AND status='PENDING_APPROVAL'",
+            (call.from_user.id, now_utc(), deploy_id)
         )
-        main_bot.edit_message_text(f"⚠️ CONFIRM DEPLOYMENT\n\nProject: {deploy['id']}\n\nContinue?",
-                                   reply_markup=kb,
-                                   chat_id=call.message.chat.id, message_id=call.message.message_id)
+        conn.commit()
+        updated = c.rowcount
+        conn.close()
+
+        if updated:
+            main_bot.answer_callback_query(call.id, "✅ Approved — starting hosting")
+            try:
+                main_bot.edit_message_text(
+                    "✅ <b>DEPLOYMENT APPROVED</b>\n\n"
+                    f"Project: <code>{html.escape(deploy_id)}</code>\n"
+                    "Status: 🚀 <b>DEPLOYING...</b>",
+                    chat_id=call.message.chat.id,
+                    message_id=call.message.message_id
+                )
+            except Exception:
+                pass
+            log_audit(call.from_user.id, call.from_user.first_name, "DEPLOY_APPROVE", f"Approved {deploy_id}")
+            try:
+                main_bot.send_message(
+                    deploy["user_id"],
+                    f"✅ <b>DEPLOYMENT APPROVED</b>\n\n"
+                    f"Project: <code>{html.escape(deploy_id)}</code>\n"
+                    "Status: 🚀 <b>DEPLOYING...</b>"
+                )
+            except Exception:
+                pass
+            threading.Thread(target=start_hosting, args=(deploy_id,), daemon=True).start()
+        else:
+            main_bot.answer_callback_query(call.id, "⚠️ Already handled")
     elif action == "reject":
         if deploy["status"] != "PENDING_APPROVAL":
             main_bot.answer_callback_query(call.id, "⚠️ Action expired")
@@ -3081,7 +2936,7 @@ Reject Reason: {deploy['rejected_reason'] or '—'}
         main_bot.answer_callback_query(call.id, "❌ Invalid action")
 
 def reject_reason(message, deploy_id):
-    reason = (message.text or "").strip() or "No reason provided."
+    reason = message.text
     conn = get_db()
     c = conn.cursor()
     c.execute(
@@ -3113,14 +2968,8 @@ def _resolve_runtime_command(command_str, sandbox_dir, original_name):
         "node", "java", "javac", "gcc", "g++", "make", "sh", "bash",
         "npm", "pip3", "pip"
     }
-    sandbox_resolved = sandbox_dir.resolve()
-    try:
-        executable_resolved = Path(executable).resolve()
-    except Exception:
-        executable_resolved = None
-    sandbox_local = bool(executable_resolved and (executable_resolved == sandbox_resolved or sandbox_resolved in executable_resolved.parents))
     if executable not in allowed_binaries and not (
-        executable.startswith("/usr/bin/") or executable.startswith("/bin/") or sandbox_local
+        executable.startswith("/usr/bin/") or executable.startswith("/bin/")
     ):
         raise ValueError(f"Unsupported executable: {executable}")
 
@@ -3142,7 +2991,7 @@ def _stream_process_output(proc, log_path, deploy_id, user_id):
     """Persist stdout/stderr and mark the deployment crashed when the process exits."""
     try:
         with open(log_path, "a", encoding="utf-8", errors="replace") as log:
-            log.write(f"\n===== PROCESS START {now_utc().isoformat()} =====\n")
+            log.write(f"\\n===== PROCESS START {now_utc().isoformat()} =====\\n")
             for raw in iter(proc.stdout.readline, b""):
                 if not raw:
                     break
@@ -3173,9 +3022,9 @@ def _stream_process_output(proc, log_path, deploy_id, user_id):
             try:
                 main_bot.send_message(
                     user_id,
-                    f"⚠️ <b>HOSTING CRASHED</b>\n\n"
-                    f"Deployment: <code>{deploy_id}</code>\n"
-                    f"Exit code: <code>{rc}</code>\n"
+                    f"⚠️ <b>HOSTING CRASHED</b>\\n\\n"
+                    f"Deployment: <code>{deploy_id}</code>\\n"
+                    f"Exit code: <code>{rc}</code>\\n"
                     f"Use <b>📜 LOGS</b> to see the error."
                 )
             except Exception:
@@ -3257,237 +3106,6 @@ def send_v5_file_status(chat_id, user_id, file_id):
     main_bot.send_message(chat_id, text, reply_markup=file_detail_kb(file_id, host))
 
 
-def _find_project_file(root: Path, filename: str) -> Optional[Path]:
-    """Find a project metadata file without leaving the deployment sandbox."""
-    direct = root / filename
-    if direct.is_file():
-        return direct
-    try:
-        for candidate in root.rglob(filename):
-            if candidate.is_file() and root in candidate.resolve().parents:
-                return candidate
-    except Exception:
-        pass
-    return None
-
-
-def _auto_install_common_python_imports(sandbox_dir: Path, python_bin: Path, log_file: Path) -> None:
-    """Best-effort bootstrap for common Python libraries when no requirements file exists.
-
-    Import names are mapped only for well-known packages; unknown imports are left alone
-    so local modules and private packages are never guessed.
-    """
-    import ast
-    package_map = {
-        "pyrogram": "pyrogram",
-        "telebot": "pyTelegramBotAPI",
-        "telegram": "python-telegram-bot",
-        "discord": "discord.py",
-        "requests": "requests",
-        "aiohttp": "aiohttp",
-        "bs4": "beautifulsoup4",
-        "PIL": "Pillow",
-        "dotenv": "python-dotenv",
-        "flask": "Flask",
-        "fastapi": "fastapi",
-        "uvicorn": "uvicorn",
-        "pymongo": "pymongo",
-        "sqlalchemy": "SQLAlchemy",
-        "numpy": "numpy",
-        "pandas": "pandas",
-        "yaml": "PyYAML",
-        "cv2": "opencv-python",
-    }
-    imports = set()
-    for source in sandbox_dir.rglob("*.py"):
-        if ".volt_venv" in source.parts:
-            continue
-        try:
-            tree = ast.parse(source.read_text(encoding="utf-8", errors="ignore"))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    imports.update(a.name.split(".")[0] for a in node.names)
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    imports.add(node.module.split(".")[0])
-        except Exception:
-            continue
-
-    missing_packages = []
-    for module in sorted(imports):
-        package = package_map.get(module)
-        if not package:
-            continue
-        check = subprocess.run(
-            [str(python_bin), "-c", f"import {module}"], cwd=str(sandbox_dir),
-            env=_sanitize_host_env(), stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20, check=False
-        )
-        if check.returncode != 0 and package not in missing_packages:
-            missing_packages.append(package)
-
-    if not missing_packages:
-        return
-
-    with open(log_file, "a", encoding="utf-8", errors="replace") as lf:
-        lf.write("\n===== AUTO-DETECT PYTHON DEPENDENCIES =====\n")
-        lf.write("Installing: " + ", ".join(missing_packages) + "\n")
-
-    result = subprocess.run(
-        [str(python_bin), "-m", "pip", "install", "--disable-pip-version-check", *missing_packages],
-        cwd=str(sandbox_dir), env=_sanitize_host_env(), stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300, check=False
-    )
-    with open(log_file, "a", encoding="utf-8", errors="replace") as lf:
-        lf.write(result.stdout or "")
-        lf.write(f"\n===== AUTO-DETECT INSTALL EXIT code={result.returncode} =====\n")
-    if result.returncode != 0:
-        raise RuntimeError("Automatic Python dependency installation failed")
-
-
-def _prepare_project_dependencies(sandbox_dir: Path, launch_command: str, log_file: Path) -> str:
-    """Install common declared dependencies and return the adjusted launch command.
-
-    This is a best-effort production bootstrap: Python requirements.txt and Node
-    package.json are installed automatically when present. Installation failures are
-    written to the deployment log and raised so users see the real reason instead of
-    a generic exit-code-only failure.
-    """
-    env = _sanitize_host_env()
-    setup_lines = []
-
-    req = _find_project_file(sandbox_dir, "requirements.txt")
-    pyproject = _find_project_file(sandbox_dir, "pyproject.toml")
-    if req or pyproject:
-        venv_dir = sandbox_dir / ".volt_venv"
-        python_bin = venv_dir / "bin" / "python"
-        try:
-            if not python_bin.exists():
-                setup_lines.append("[VOLT] Creating Python virtual environment...")
-                result = subprocess.run(
-                    ["python3", "-m", "venv", str(venv_dir)], cwd=str(sandbox_dir), env=env,
-                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, timeout=120, check=False
-                )
-                setup_lines.append(result.stdout or "")
-                if result.returncode != 0:
-                    raise RuntimeError("Python virtual environment creation failed")
-            if req:
-                setup_lines.append(f"[VOLT] Installing Python dependencies from {req.relative_to(sandbox_dir)}...")
-                result = subprocess.run(
-                    [str(python_bin), "-m", "pip", "install", "--disable-pip-version-check", "-r", str(req)],
-                    cwd=str(req.parent), env=env, stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300, check=False
-                )
-            else:
-                setup_lines.append("[VOLT] Installing Python project from pyproject.toml...")
-                result = subprocess.run(
-                    [str(python_bin), "-m", "pip", "install", "--disable-pip-version-check", "."],
-                    cwd=str(pyproject.parent), env=env, stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300, check=False
-                )
-            setup_lines.append(result.stdout or "")
-            if result.returncode != 0:
-                raise RuntimeError("Python dependency installation failed")
-
-            parts = shlex.split(launch_command)
-            if parts and Path(parts[0]).name in {"python", "python3"}:
-                parts[0] = str(python_bin)
-                launch_command = shlex.join(parts)
-        except Exception as exc:
-            with open(log_file, "a", encoding="utf-8", errors="replace") as lf:
-                lf.write("\n===== DEPENDENCY SETUP ERROR =====\n")
-                lf.write("\n".join(setup_lines)[-12000:])
-                lf.write(f"\n{type(exc).__name__}: {exc}\n")
-            raise
-
-    # Even without a dependency manifest, use an isolated Python environment and
-    # install only a small, well-known set of missing imports.
-    if not req and not pyproject:
-        py_files = list(sandbox_dir.rglob("*.py"))
-        if py_files:
-            venv_dir = sandbox_dir / ".volt_venv"
-            python_bin = venv_dir / "bin" / "python"
-            if not python_bin.exists():
-                result = subprocess.run(
-                    ["python3", "-m", "venv", str(venv_dir)], cwd=str(sandbox_dir), env=env,
-                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, timeout=120, check=False
-                )
-                setup_lines.append(result.stdout or "")
-                if result.returncode != 0:
-                    raise RuntimeError("Python virtual environment creation failed")
-            _auto_install_common_python_imports(sandbox_dir, python_bin, log_file)
-            parts = shlex.split(launch_command)
-            if parts and Path(parts[0]).name in {"python", "python3"}:
-                parts[0] = str(python_bin)
-                launch_command = shlex.join(parts)
-
-    package_json = _find_project_file(sandbox_dir, "package.json")
-    if package_json:
-        node_modules = package_json.parent / "node_modules"
-        if not node_modules.exists():
-            setup_lines.append(f"[VOLT] Installing Node dependencies from {package_json.relative_to(sandbox_dir)}...")
-            result = subprocess.run(
-                ["npm", "install", "--omit=dev", "--no-audit", "--no-fund"],
-                cwd=str(package_json.parent), env=env, stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300, check=False
-            )
-            setup_lines.append(result.stdout or "")
-            if result.returncode != 0:
-                with open(log_file, "a", encoding="utf-8", errors="replace") as lf:
-                    lf.write("\n===== NODE DEPENDENCY SETUP ERROR =====\n")
-                    lf.write("\n".join(setup_lines)[-12000:])
-                raise RuntimeError("Node dependency installation failed")
-
-    if setup_lines:
-        with open(log_file, "a", encoding="utf-8", errors="replace") as lf:
-            lf.write("\n===== AUTOMATIC DEPENDENCY SETUP =====\n")
-            lf.write("\n".join(setup_lines)[-16000:])
-            lf.write("\n===== DEPENDENCY SETUP COMPLETE =====\n")
-    return launch_command
-
-
-def _infer_sandbox_start_command(sandbox_dir: Path, fallback_name: str) -> str:
-    """Infer an entry point from the extracted project itself."""
-    package_json = _find_project_file(sandbox_dir, "package.json")
-    if package_json:
-        try:
-            data = json.loads(package_json.read_text(encoding="utf-8"))
-            scripts = data.get("scripts") or {}
-            if scripts.get("start"):
-                return f"npm start --prefix {shlex.quote(str(package_json.parent))}"
-            main = data.get("main")
-            if main:
-                return f"node {shlex.quote(str(package_json.parent / main))}"
-        except Exception:
-            pass
-
-    preferred = [
-        "bot.py", "main.py", "app.py", "run.py", "index.py", "server.py",
-        "bot.js", "main.js", "app.js", "index.js", "server.js", "start.sh"
-    ]
-    files = []
-    try:
-        files = [x for x in sandbox_dir.rglob("*") if x.is_file()]
-    except Exception:
-        pass
-    by_name = {}
-    for f in files:
-        by_name.setdefault(f.name.lower(), f)
-    for candidate in preferred:
-        f = by_name.get(candidate.lower())
-        if f:
-            rel = f.relative_to(sandbox_dir)
-            if f.suffix.lower() == ".py":
-                return f"python3 {shlex.quote(str(rel))}"
-            if f.suffix.lower() == ".js":
-                return f"node {shlex.quote(str(rel))}"
-            if f.suffix.lower() == ".sh":
-                return f"bash {shlex.quote(str(rel))}"
-    # If the original file is directly present, use its normal extension.
-    return _infer_start_command(sandbox_dir / Path(fallback_name).name, fallback_name)
-
-
 def start_hosting(deploy_id):
     conn = get_db()
     c = conn.cursor()
@@ -3514,15 +3132,6 @@ def start_hosting(deploy_id):
 
     file_path = Path(file_row["path"])
     user_id = deploy["user_id"]
-    sandbox_dir = SANDBOX_ROOT / str(user_id) / f"deploy_{deploy_id}"
-    shutil.rmtree(sandbox_dir, ignore_errors=True)
-    sandbox_dir.mkdir(parents=True, exist_ok=True)
-    log_file = sandbox_dir / "output.log"
-    with open(log_file, "w", encoding="utf-8", errors="replace") as f:
-        f.write(f"VOLT deployment {deploy_id}\n")
-        f.write(f"Project file: {file_row['name']}\n")
-        f.write(f"Started: {now_utc().isoformat()}\n")
-        f.write("Startup mode: AUTOMATIC\n")
 
     # Startup is ALWAYS automatic. Ignore any legacy value that may still be
     # stored in the database (for example /start, an emoji, or an old manual
@@ -3541,6 +3150,10 @@ def start_hosting(deploy_id):
         logger.exception("Automatic startup detection failed for %s: %s", deploy_id, repair_exc)
         stored_command = ""
 
+    sandbox_dir = SANDBOX_ROOT / str(user_id) / f"deploy_{deploy_id}"
+    shutil.rmtree(sandbox_dir, ignore_errors=True)
+    sandbox_dir.mkdir(parents=True, exist_ok=True)
+
     try:
         if not file_path.exists():
             raise FileNotFoundError(f"Uploaded file missing: {file_path}")
@@ -3557,12 +3170,8 @@ def start_hosting(deploy_id):
             shutil.copy2(file_path, sandbox_dir / file_path.name)
             original_name = file_path.name
 
-        # Never fall back to a user-entered/legacy command. Re-infer from the actual
-        # extracted sandbox so ZIP projects can use package.json or nested entry files.
-        if file_path.suffix.lower() == ".zip":
-            launch_command = _infer_sandbox_start_command(sandbox_dir, file_row["name"])
-        else:
-            launch_command = _infer_start_command(file_path, file_row["name"])
+        # Never fall back to the legacy database command; automatic detection is the only source.
+        launch_command = stored_command or _infer_start_command(file_path, file_row["name"])
 
         # Compile native/source projects automatically before launching them.
         # Compilation output stays inside the deployment sandbox.
@@ -3574,9 +3183,6 @@ def start_hosting(deploy_id):
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, timeout=90, check=False
             )
-            with open(log_file, "a", encoding="utf-8", errors="replace") as lf:
-                lf.write("\n===== JAVA COMPILATION =====\n")
-                lf.write(result.stdout or "")
             if result.returncode != 0:
                 raise RuntimeError("Java compilation failed: " + (result.stdout or "")[-1200:])
         elif ext == ".c":
@@ -3586,9 +3192,6 @@ def start_hosting(deploy_id):
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, timeout=90, check=False
             )
-            with open(log_file, "a", encoding="utf-8", errors="replace") as lf:
-                lf.write("\n===== C COMPILATION =====\n")
-                lf.write(result.stdout or "")
             if result.returncode != 0:
                 raise RuntimeError("C compilation failed: " + (result.stdout or "")[-1200:])
         elif ext == ".cpp":
@@ -3598,9 +3201,6 @@ def start_hosting(deploy_id):
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, timeout=90, check=False
             )
-            with open(log_file, "a", encoding="utf-8", errors="replace") as lf:
-                lf.write("\n===== C++ COMPILATION =====\n")
-                lf.write(result.stdout or "")
             if result.returncode != 0:
                 raise RuntimeError("C++ compilation failed: " + (result.stdout or "")[-1200:])
 
@@ -3609,14 +3209,11 @@ def start_hosting(deploy_id):
 
         env = _sanitize_host_env()
 
-        with open(log_file, "a", encoding="utf-8", errors="replace") as f:
-            f.write(f"Command (before dependency setup): {launch_command}\n")
-
-        # Automatically prepare declared Python/Node dependencies before launch.
-        launch_command = _prepare_project_dependencies(sandbox_dir, launch_command, log_file)
-        parts = _resolve_runtime_command(launch_command, sandbox_dir, original_name)
-        with open(log_file, "a", encoding="utf-8", errors="replace") as f:
-            f.write(f"Command (final): {' '.join(parts)}\n")
+        log_file = sandbox_dir / "output.log"
+        with open(log_file, "w", encoding="utf-8") as f:
+            f.write(f"VOLT deployment {deploy_id}\\n")
+            f.write(f"Command: {' '.join(parts)}\\n")
+            f.write(f"Started: {now_utc().isoformat()}\\n")
 
         _validate_command(parts)
         proc = subprocess.Popen(
@@ -3637,22 +3234,11 @@ def start_hosting(deploy_id):
         time.sleep(0.8)
         rc = proc.poll()
         if rc is not None:
-            output = ""
-            try:
-                if proc.stdout:
-                    output = proc.stdout.read()
-                    if isinstance(output, bytes):
-                        output = output.decode("utf-8", errors="replace")
-                    else:
-                        output = str(output)
-            except Exception as read_exc:
-                output = f"<could not read process output: {read_exc}>"
             with open(log_file, "a", encoding="utf-8", errors="replace") as f:
-                if output:
-                    f.write("\n===== STDOUT / STDERR =====\n")
-                    f.write(output)
-                f.write(f"\n===== PROCESS EXIT code={rc} =====\n")
-            raise RuntimeError(f"Process exited immediately with code {rc}. Open 📜 LOGS for the actual error.")
+                output = proc.stdout.read().decode("utf-8", errors="replace") if proc.stdout else ""
+                f.write(output)
+                f.write(f"\\n===== PROCESS EXIT code={rc} =====\\n")
+            raise RuntimeError(f"Process exited immediately with code {rc}. Check Logs.")
 
         host_id = generate_id("VOLT-HOST")
         now = now_utc()
@@ -3690,18 +3276,12 @@ def start_hosting(deploy_id):
         conn.commit()
         conn.close()
         try:
-            kb_fail = types.InlineKeyboardMarkup(row_width=2)
-            kb_fail.add(
-                types.InlineKeyboardButton("📜 VIEW LOGS", callback_data=f"file_logs_{deploy['file_id']}"),
-                types.InlineKeyboardButton("📁 MY FILES", callback_data="menu_files")
-            )
             main_bot.send_message(
                 user_id,
-                f"❌ <b>HOSTING FAILED</b>\n\n"
-                f"Deployment: <code>{deploy_id}</code>\n"
-                f"Error: <code>{html.escape(str(e)[:900])}</code>\n\n"
-                "📜 Open Logs to see the complete startup/dependency error.",
-                reply_markup=kb_fail
+                f"❌ <b>HOSTING FAILED</b>\\n\\n"
+                f"Deployment: <code>{deploy_id}</code>\\n"
+                f"Error: <code>{str(e)[:900]}</code>\\n\\n"
+                "📜 Check the deployment logs/admin details."
             )
         except Exception:
             pass
