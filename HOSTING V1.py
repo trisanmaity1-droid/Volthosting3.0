@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 VOLT ⚡ HOSTING - Professional Telegram Hosting Platform
-Version: V12.09.111
+Version: V13.00.000 · V6 ULTRA
 Powered by VOLT ⚡ STUDIO
 © 2026 VOLT ⚡ STUDIO — All Rights Reserved.
 
@@ -72,7 +72,7 @@ UPI_LOGO = ""  # optional path to logo
 
 # Branding
 BRAND = "VOLT ⚡ HOSTING"
-BRAND_VER = "V12.09.111"
+BRAND_VER = "V13.00.000 · V6 ULTRA"
 STUDIO = "VOLT ⚡ STUDIO"
 FOOTER = f"\n© 2026 {STUDIO}\nAll Rights Reserved."
 
@@ -224,6 +224,36 @@ def get_db():
     conn.execute("PRAGMA temp_store = MEMORY")
     conn.execute("PRAGMA cache_size = -32000")
     return conn
+
+def sanitize_legacy_start_commands():
+    """Normalize legacy deployment records without asking users for startup settings."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT d.id, d.start_command, f.path, f.name "
+        "FROM deployments d LEFT JOIN files f ON f.id=d.file_id"
+    ).fetchall()
+    changed = 0
+    for row in rows:
+        if not row["path"] or not row["name"]:
+            continue
+        try:
+            cmd = _infer_start_command(Path(row["path"]), row["name"])
+            if "$PORT" in cmd:
+                cmd = cmd.replace("$PORT", str(int(os.environ.get("PORT", "8080"))))
+            if str(row["start_command"] or "") != cmd:
+                conn.execute(
+                    "UPDATE deployments SET start_command=?, runtime='auto' WHERE id=?",
+                    (cmd, row["id"]),
+                )
+                changed += 1
+        except Exception:
+            # Unsupported/missing legacy files remain untouched; start_hosting
+            # will report a clean automatic-detection error if the user retries.
+            continue
+    conn.commit()
+    conn.close()
+    if changed:
+        logger.info("Normalized %s legacy deployment startup records to automatic detection", changed)
 
 def init_db():
     conn = get_db()
@@ -775,7 +805,8 @@ def main_menu_kb(user_id=None):
         ("📤 UPLOAD FILE", "📁 MY FILES"),
         ("📊 ANALYTICS", "👤 ACCOUNT"),
         ("💎 PREMIUM", "🎫 SUPPORT"),
-        ("ℹ️ ABOUT VOLT", "⚡ BOT SPEED"),
+        ("🎁 REFERRAL", "ℹ️ ABOUT VOLT"),
+        ("⚡ BOT SPEED",),
     ]
     if user_id and is_admin(user_id):
         rows.append(("👑 V5 CONTROL CENTER",))
@@ -832,6 +863,58 @@ def file_detail_kb(file_id, hosting_row=None):
     return kb
 
 
+def get_process_metrics(pid):
+    """Return best-effort CPU percent and RSS memory for a hosted process."""
+    if not pid:
+        return "—", "—"
+    try:
+        import psutil
+        proc = psutil.Process(int(pid))
+        mem_mb = proc.memory_info().rss / (1024 * 1024)
+        cpu = proc.cpu_percent(interval=0.05)
+        return f"{cpu:.1f}%", f"{mem_mb:.1f} MB"
+    except Exception:
+        pass
+    # Linux fallback without an extra dependency.
+    try:
+        status = Path(f"/proc/{int(pid)}/status")
+        rss = "—"
+        for line in status.read_text(errors="ignore").splitlines():
+            if line.startswith("VmRSS:"):
+                kb = int(line.split()[1])
+                rss = f"{kb/1024:.1f} MB"
+                break
+        return "—", rss
+    except Exception:
+        return "—", "—"
+
+
+def recover_stale_hosting_records():
+    """Mark stale ONLINE records as CRASHED after a Railway/container restart.
+    This never auto-restarts user applications.
+    """
+    conn = get_db()
+    rows = conn.execute("SELECT id, process_id, deployment_id FROM hosting WHERE status='ONLINE'").fetchall()
+    changed = 0
+    for row in rows:
+        pid = row["process_id"]
+        alive = False
+        if pid:
+            try:
+                os.kill(int(pid), 0)
+                alive = True
+            except OSError:
+                alive = False
+        if not alive:
+            conn.execute("UPDATE hosting SET status='CRASHED', stopped_at=? WHERE id=? AND status='ONLINE'",
+                         (now_utc(), row["id"]))
+            conn.execute("UPDATE deployments SET status='CRASHED', stopped_at=? WHERE id=? AND status='ONLINE'",
+                         (now_utc(), row["deployment_id"]))
+            changed += 1
+    conn.commit(); conn.close()
+    if changed:
+        logger.warning("Recovered %s stale hosting records after startup", changed)
+
 def show_file_detail(call, file_id):
     """Render a premium single-file dashboard matching the requested UI."""
     user = call.from_user
@@ -853,7 +936,7 @@ def show_file_detail(call, file_id):
     dep = None
     if host:
         dep = conn.execute(
-            "SELECT start_command, port, status FROM deployments WHERE id=?",
+            "SELECT start_command, status FROM deployments WHERE id=?",
             (host["deployment_id"],)
         ).fetchone()
     conn.close()
@@ -872,20 +955,20 @@ def show_file_detail(call, file_id):
 
     size = int(file_row["size"] or 0)
     size_mb = size / (1024 * 1024)
-    port = dep["port"] if dep else "—"
-    command = dep["start_command"] if dep else "Not deployed yet"
+    command = "Automatic detection"
+    cpu_text, mem_text = get_process_metrics(host["process_id"] if host else None)
+    restarts = int(host["restart_count"] or 0) if host else 0
 
     text = (
         f"📁 <b>{html.escape(str(file_row['name']))}</b>\n\n"
         f"📌 <b>File #{file_id}</b>\n"
         f"📊 <b>Status:</b> {emoji} <b>{status.title()}</b>\n"
         f"📦 <b>Size:</b> {size_mb:.2f} MB\n"
-        f"🖥️ <b>Memory:</b> —\n"
-        f"📈 <b>CPU:</b> —\n"
+        f"🖥️ <b>Memory:</b> {mem_text}\n"
+        f"📈 <b>CPU:</b> {cpu_text}\n"
         f"⏱️ <b>Uptime:</b> {uptime}\n"
-        f"🔄 <b>Restarts:</b> 0\n"
-        f"🌐 <b>Port:</b> {port}\n"
-        f"⚙️ <b>Command:</b> <code>{html.escape(str(command))}</code>\n\n"
+        f"🔄 <b>Restarts:</b> {restarts}\n"
+        "🤖 <b>Startup:</b> ⚡ Automatic\n\n"
         "👇 <b>Choose an action below:</b>"
     )
 
@@ -1035,6 +1118,78 @@ def send_upload_prompt(message):
         reply_markup=upload_prompt_kb()
     )
 
+def _record_referral_from_start(message):
+    """Record a referral from /start ref_<user_id> once per referred user."""
+    text = (message.text or "").strip()
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2:
+        return None
+    payload = parts[1].strip()
+    if not payload.startswith("ref_"):
+        return None
+    try:
+        referrer_id = int(payload[4:])
+    except (TypeError, ValueError):
+        return None
+    referred_id = int(message.from_user.id)
+    if referrer_id <= 0 or referrer_id == referred_id:
+        return None
+    conn = get_db()
+    try:
+        existing = conn.execute("SELECT id FROM referrals WHERE referred_id=?", (referred_id,)).fetchone()
+        if existing:
+            return None
+        referrer = conn.execute("SELECT id FROM users WHERE id=? AND banned=0", (referrer_id,)).fetchone()
+        if not referrer:
+            return None
+        conn.execute(
+            "INSERT INTO referrals(referrer_id,referred_id,status,reward) VALUES(?,?,?,?)",
+            (referrer_id, referred_id, "ACTIVE", 0.0),
+        )
+        conn.commit()
+        return referrer_id
+    except Exception:
+        logger.exception("Failed to record referral")
+        return None
+    finally:
+        conn.close()
+
+def _referral_stats(user_id):
+    conn = get_db()
+    try:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (user_id,)
+        ).fetchone()[0]
+        rewards = conn.execute(
+            "SELECT COALESCE(SUM(reward),0) FROM referrals WHERE referrer_id=?", (user_id,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    return int(count), float(rewards or 0)
+
+def _send_referral_message(message):
+    user_id = int(message.from_user.id)
+    count, rewards = _referral_stats(user_id)
+    try:
+        bot_username = main_bot.get_me().username
+    except Exception:
+        bot_username = None
+    link = f"https://t.me/{bot_username}?start=ref_{user_id}" if bot_username else "Referral link temporarily unavailable."
+    text = (
+        "🎁 <b>VOLT ⚡ REFERRAL</b>\n\n"
+        "Invite your friends to VOLT ⚡ HOSTING using your personal referral link.\n\n"
+        f"👥 Successful referrals: <b>{count}</b>\n"
+        f"💰 Recorded rewards: <b>₹{rewards:.2f}</b>\n\n"
+        "🔗 <b>Your Referral Link</b>\n"
+        f"<code>{html.escape(link)}</code>\n\n"
+        "⚡ Share the link and ask your friend to open the bot through it."
+    )
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    if bot_username:
+        kb.add(types.InlineKeyboardButton("🔗 OPEN REFERRAL LINK", url=link))
+    kb.add(types.InlineKeyboardButton("🏠 MAIN MENU", callback_data="menu_main"))
+    main_bot.send_message(message.chat.id, text, reply_markup=kb)
+
 # ==========================
 #  MAIN BOT
 # ==========================
@@ -1050,6 +1205,7 @@ def cmd_start(message: types.Message):
     user = message.from_user
     create_user(user)
     update_last_active(user.id)
+    _record_referral_from_start(message)
     username = user.username if user.username else "Not Set"
     text = f"""
 <b>{BRAND}</b>
@@ -1154,7 +1310,7 @@ def handle_document(message: types.Message):
         f"📦 Project: <code>{html.escape(final_path.name)}</code>\n"
         f"📏 Size: <b>{len(downloaded):,} bytes</b>\n"
         "🟢 Status: <b>STORED</b>\n\n"
-        "Open <b>📁 MY FILES</b> and select the file to configure/start it.",
+        "Open <b>📁 MY FILES</b> and select the file to deploy/start it.",
         reply_markup=types.InlineKeyboardMarkup(row_width=2).add(
             types.InlineKeyboardButton("📁 MY FILES", callback_data="menu_files"),
             types.InlineKeyboardButton("🏠 MAIN MENU", callback_data="menu_main")
@@ -1234,12 +1390,12 @@ def reply_my_hosting(message):
     for h in hosting:
         conn2 = get_db()
         c2 = conn2.cursor()
-        c2.execute("SELECT start_command, port FROM deployments WHERE id=?", (h["deployment_id"],))
+        c2.execute("SELECT start_command FROM deployments WHERE id=?", (h["deployment_id"],))
         dep = c2.fetchone()
         conn2.close()
         emoji = "🟢" if h["status"] == "ONLINE" else "🔴"
         text += f"{emoji} <b>{h['id']}</b>\n"
-        text += f"Status: {h['status']} | Port: {dep['port'] if dep else 'N/A'}\n"
+        text += f"Status: {h['status']}\n"
         text += f"Command: {dep['start_command'] if dep else 'N/A'}\n\n"
         if h["status"] == "ONLINE":
             kb.add(types.InlineKeyboardButton(f"⏹️ STOP • {h['id']}", callback_data=f"host_stop_{h['id']}"))
@@ -1345,15 +1501,15 @@ def _send_my_hosting_message(message):
     for h in rows:
         conn = get_db()
         dep = conn.execute(
-            "SELECT start_command, port FROM deployments WHERE id=?",
+            "SELECT start_command FROM deployments WHERE id=?",
             (h["deployment_id"],)
         ).fetchone()
         conn.close()
         emoji = "🟢" if h["status"] == "ONLINE" else "🔴"
         text += (
             f"{emoji} <b>{h['id']}</b>\n"
-            f"Status: <b>{h['status']}</b> | Port: <b>{dep['port'] if dep else 'N/A'}</b>\n"
-            f"Command: <code>{html.escape(dep['start_command']) if dep else 'N/A'}</code>\n\n"
+            f"Status: <b>{h['status']}</b>\n"
+            "Startup: Automatic\n\n"
         )
         if h["status"] == "ONLINE":
             kb.add(types.InlineKeyboardButton(
@@ -1585,7 +1741,10 @@ def v5_keyboard_account(message):
 
 @main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() in {"💎 PREMIUM"})
 def v5_keyboard_premium(message):
-    if _require_private_user(message): show_buy(message)
+    # Reply-keyboard events are normal Message objects. Do not pass them to
+    # the callback-only show_buy(call) function.
+    if _require_private_user(message):
+        _send_buy_message(message)
 
 @main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() in {"📤 UPLOAD FILE"})
 def v5_keyboard_upload(message):
@@ -1603,7 +1762,11 @@ def v5_keyboard_files(message):
 def v5_keyboard_support(message):
     if _require_private_user(message): _send_support_message(message)
 
-@main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() in {"ℹ️ ABOUT VOLT"})
+@main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() in {"🎁 REFERRAL", "🎁 REFERRALS"})
+def v5_keyboard_referral(message):
+    if _require_private_user(message): _send_referral_message(message)
+
+@main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() in {"ℹ️ ABOUT VOLT", "ABOUT VOLT"})
 def v5_keyboard_about(message):
     if _require_private_user(message): _send_about_message(message)
 
@@ -1805,7 +1968,7 @@ def admin_backups_page(call):
     main_bot.edit_message_text('💾 <b>BACKUPS</b>\n\n'+body,chat_id=call.message.chat.id,message_id=call.message.message_id,parse_mode='HTML',reply_markup=kb)
 
 def admin_branding_page(call):
-    _admin_simple_page(call,'🖼️ <b>BRANDING</b>',f'Brand: <b>{html.escape(BRAND)}</b>\nVersion: <b>V5 ULTRA</b>\nUI: <b>2-column Admin Control Center</b>', 'admin_branding')
+    _admin_simple_page(call,'🖼️ <b>BRANDING</b>',f'Brand: <b>{html.escape(BRAND)}</b>\nVersion: <b>V13.00.000 · V6 ULTRA</b>\nUI: <b>2-column Admin Control Center</b>', 'admin_branding')
 
 def show_admin_panel(message_or_call):
     user = message_or_call.from_user
@@ -1982,7 +2145,7 @@ def show_admin_queue(call, kind):
 @main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() == "💎 𝐁𝐔𝐘 𝐏𝐑𝐄𝐌𝐈𝐔𝐌")
 def v5_buy_premium_alias(message):
     if _require_private_user(message):
-        show_buy(message)
+        _send_buy_message(message)
 
 @main_bot.message_handler(func=lambda m: (m.text or "").strip().upper() == "📜 𝐕𝐈𝐄𝐖 𝐋𝐎𝐆𝐒")
 def v5_logs_alias(message):
@@ -2053,6 +2216,10 @@ def main_callback(call):
             main_bot.answer_callback_query(call.id)
             show_support(call)
 
+        elif data == "menu_referral":
+            main_bot.answer_callback_query(call.id)
+            _send_referral_message(call.message)
+
         elif data == "menu_account":
             main_bot.answer_callback_query(call.id)
             show_account(call)
@@ -2086,15 +2253,57 @@ def main_callback(call):
             conn = get_db()
             try:
                 total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-                active = conn.execute("SELECT COUNT(*) FROM users WHERE banned=0").fetchone()[0]
+                active = conn.execute("SELECT COUNT(*) FROM users WHERE is_banned=0").fetchone()[0]
+                rows = conn.execute("SELECT id, username, first_name, is_banned, last_active FROM users ORDER BY last_active DESC LIMIT 12").fetchall()
             finally:
                 conn.close()
+            kb = types.InlineKeyboardMarkup(row_width=2)
+            body = [f"👥 <b>USERS · V6 ULTRA</b>", f"Total: <b>{total}</b>  •  Active: <b>{active}</b>", ""]
+            for r in rows:
+                name = html.escape((r["first_name"] or r["username"] or str(r["id"]))[:24])
+                state = "🚫 BANNED" if r["is_banned"] else "🟢 ACTIVE"
+                body.append(f"👤 <b>{name}</b> · <code>{r['id']}</code> · {state}")
+                if int(r["id"]) not in (OWNER_ID, CO_OWNER_ID):
+                    if r["is_banned"]:
+                        kb.add(types.InlineKeyboardButton(f"♻️ Unban {r['id']}", callback_data=f"admin_unban_{r['id']}"))
+                    else:
+                        kb.add(types.InlineKeyboardButton(f"🚫 Ban {r['id']}", callback_data=f"admin_ban_{r['id']}"))
+            kb.add(types.InlineKeyboardButton("🔄 REFRESH", callback_data="admin_users"), types.InlineKeyboardButton("↩️ BACK", callback_data="admin_dashboard"))
             main_bot.answer_callback_query(call.id)
-            main_bot.send_message(
-                call.message.chat.id,
-                f"👥 <b>USERS · V5 ULTRA</b>\n\nTotal users: <b>{total}</b>\nActive users: <b>{active}</b>",
-                reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ BACK", callback_data="admin_dashboard")),
-            )
+            try:
+                main_bot.edit_message_text("\n".join(body), call.message.chat.id, call.message.message_id, reply_markup=kb)
+            except Exception:
+                main_bot.send_message(call.message.chat.id, "\n".join(body), reply_markup=kb)
+
+        elif data.startswith("admin_ban_") or data.startswith("admin_unban_"):
+            if not is_admin(user.id):
+                main_bot.answer_callback_query(call.id, "⛔ Unauthorized")
+                return
+            target = int(data.rsplit("_", 1)[1])
+            if target in (OWNER_ID, CO_OWNER_ID):
+                main_bot.answer_callback_query(call.id, "⛔ Protected admin", show_alert=True)
+                return
+            banned = data.startswith("admin_ban_")
+            conn = get_db()
+            conn.execute("UPDATE users SET is_banned=? WHERE id=?", (1 if banned else 0, target))
+            conn.commit(); conn.close()
+            log_audit(user.id, user.first_name or "Admin", "USER_BAN" if banned else "USER_UNBAN", str(target))
+            main_bot.answer_callback_query(call.id, "🚫 Banned" if banned else "♻️ Unbanned")
+            if banned:
+                # Stop active hosting safely when access is revoked.
+                conn = get_db()
+                hosts = conn.execute("SELECT id, process_id, deployment_id FROM hosting WHERE user_id=? AND status='ONLINE'", (target,)).fetchall()
+                for h in hosts:
+                    try:
+                        if h["process_id"]:
+                            os.killpg(os.getpgid(h["process_id"]), signal.SIGKILL) if os.name == "posix" else os.kill(h["process_id"], signal.SIGKILL)
+                    except Exception:
+                        pass
+                    conn.execute("UPDATE hosting SET status='STOPPED', stopped_at=? WHERE id=?", (now_utc(), h["id"]))
+                    conn.execute("UPDATE deployments SET status='STOPPED', stopped_at=? WHERE id=?", (now_utc(), h["deployment_id"]))
+                conn.commit(); conn.close()
+            # Re-render the users page.
+            main_callback(types.SimpleNamespace(from_user=user, message=call.message, data="admin_users", id=call.id))
 
         elif data == "admin_files":
             if not is_admin(user.id):
@@ -2239,8 +2448,11 @@ def main_callback(call):
                 time.sleep(0.4)
                 show_file_detail(call, int(file_id))
             else:
-                main_bot.answer_callback_query(call.id, "⚙️ Deployment setup required")
-                show_deploy(call, int(file_id))
+                main_bot.answer_callback_query(call.id, "⚡ Creating automatic deployment...")
+                try:
+                    _create_deployment_request(user, int(file_id))
+                except Exception as e:
+                    main_bot.send_message(call.message.chat.id, f"❌ <b>START FAILED</b>\n\n<code>{html.escape(str(e)[:900])}</code>")
 
         elif data.startswith("deploy_start_"):
             file_id = data[len("deploy_start_"):]
@@ -2378,124 +2590,78 @@ def file_confirm_delete(call):
     conn.close()
     show_my_files(call)
 
-def show_deploy(call, file_id=None):
-    user = call.from_user
-    # Check if user has active plan or is admin
-    if not is_admin(user.id):
-        plan = get_user_plan(user.id)
-        if not plan:
-            main_bot.edit_message_text(
-                "⚠️ You need an active hosting plan to deploy. Please buy a plan first.",
-                reply_markup=back_main_kb(),
-                chat_id=call.message.chat.id, message_id=call.message.message_id
-            )
-            return
+def _infer_start_command(file_path: Path, original_name: str) -> str:
+    """Automatically choose a safe start command; users do not enter startup settings."""
+    ext = file_path.suffix.lower()
+    name = Path(original_name).name
+    if ext == ".py":
+        return f"python3 {shlex.quote(name)}"
+    if ext == ".js":
+        return f"node {shlex.quote(name)}"
+    if ext == ".sh":
+        return f"bash {shlex.quote(name)}"
+    if ext == ".java":
+        # Java source is compiled automatically by start_hosting before launch.
+        return f"java {shlex.quote(Path(name).stem)}"
+    if ext == ".c":
+        return f"./volt_app"
+    if ext == ".cpp":
+        return f"./volt_app"
+    if ext in {".html", ".txt", ".json", ".css"}:
+        # Static/text projects are served automatically on Railway's PORT.
+        return "python3 -m http.server $PORT"
+    if ext == ".zip":
+        # Pick a conventional entry point from the archive.
+        import zipfile
+        try:
+            with zipfile.ZipFile(file_path) as zf:
+                files = [n for n in zf.namelist() if not n.endswith("/") and "/" not in n.strip("/")]
+            preferred = ["bot.py", "main.py", "app.py", "run.py", "index.py", "server.py",
+                         "bot.js", "main.js", "app.js", "index.js", "server.js", "start.sh"]
+            lower = {Path(n).name.lower(): n for n in files}
+            for candidate in preferred:
+                if candidate in lower:
+                    chosen = Path(lower[candidate]).name
+                    if chosen.lower().endswith(".py"):
+                        return f"python3 {shlex.quote(chosen)}"
+                    if chosen.lower().endswith(".js"):
+                        return f"node {shlex.quote(chosen)}"
+                    if chosen.lower().endswith(".sh"):
+                        return f"bash {shlex.quote(chosen)}"
+        except Exception:
+            pass
+        raise ValueError("Could not detect a startup file inside the ZIP. Add bot.py/main.py or a supported entry file.")
+    raise ValueError(f"Automatic startup is not supported for {ext or 'this file type'}.")
 
-    if not file_id:
-        # Prompt to choose file
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT * FROM files WHERE user_id=? ORDER BY uploaded_at DESC", (user.id,))
-        files = c.fetchall()
-        conn.close()
-        if not files:
-            main_bot.edit_message_text("No files found. Upload a file first.",
-                                       reply_markup=back_main_kb(),
-                                       chat_id=call.message.chat.id, message_id=call.message.message_id)
-            return
-        kb = types.InlineKeyboardMarkup(row_width=1)
-        for f in files:
-            kb.add(types.InlineKeyboardButton(f"📦 {f['name'][:20]}", callback_data=f"deploy_start_{f['id']}"))
-        kb.add(types.InlineKeyboardButton("◀️ BACK", callback_data="menu_main"))
-        main_bot.edit_message_text("Select a file to deploy:", reply_markup=kb,
-                                   chat_id=call.message.chat.id, message_id=call.message.message_id)
-    else:
-        conn = get_db()
-        file_row = conn.execute(
-            "SELECT name, size FROM files WHERE id=? AND user_id=?", (file_id, user.id)
-        ).fetchone()
-        conn.close()
-        filename = file_row["name"] if file_row else "Project"
-        size = int(file_row["size"] or 0) if file_row else 0
-        setup_text = (
-            f"📁 <b>{html.escape(str(filename))}</b>\n\n"
-            f"📌 <b>File #{file_id}</b>\n"
-            "📊 <b>Status:</b> ⚪ <b>Stopped</b>\n"
-            f"📦 <b>Size:</b> {size / (1024 * 1024):.2f} MB\n"
-            "🖥️ <b>Memory:</b> —\n"
-            "📈 <b>CPU:</b> —\n"
-            "⏱️ <b>Uptime:</b> —\n"
-            "🔄 <b>Restarts:</b> 0\n\n"
-            "⚙️ <b>DEPLOYMENT SETUP</b>\n"
-            "Enter the start command for your project\n"
-            "<i>Example: python3 bot.py</i>"
-        )
-        main_bot.edit_message_text(
-            setup_text, chat_id=call.message.chat.id, message_id=call.message.message_id,
-            reply_markup=types.InlineKeyboardMarkup().add(
-                types.InlineKeyboardButton("⬅️ BACK TO FILES", callback_data="menu_files")
-            )
-        )
-        main_bot.register_next_step_handler(call.message, get_start_command, file_id)
 
-def get_start_command(message, file_id):
-    # The step-handler is tied to the initiating user; never accept another user's message.
-    if message.chat.type != "private" or not _validate_user_file_access(message.from_user.id, int(file_id)):
-        main_bot.reply_to(message, "⛔ Invalid deployment session.")
-        return
-    command = (message.text or "").strip()
-    if not command or len(command) > 512:
-        main_bot.reply_to(message, "⚠️ Invalid start command.")
-        return
-    if re.search(r'[;&|`$(){}<>\n\r]', command):
-        main_bot.reply_to(message, "⚠️ Command contains forbidden characters.")
-        return
-    try:
-        _validate_command(shlex.split(command))
-    except Exception:
-        main_bot.reply_to(message, "⚠️ Unsafe or invalid command.")
-        return
-    main_bot.send_message(
-        message.chat.id,
-        "🌐 <b>NETWORK CONFIGURATION</b>\n\n"
-        "Enter the port for this project <b>(1024–65535)</b>."
-    )
-    main_bot.register_next_step_handler(message, get_port, file_id, command)
-
-def get_file_name(file_id):
+def _create_deployment_request(user, file_id):
+    """Create a deployment request using automatic runtime detection."""
     conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT name FROM files WHERE id=?", (file_id,))
-    row = c.fetchone()
+    file_row = conn.execute(
+        "SELECT * FROM files WHERE id=? AND user_id=?", (int(file_id), user.id)
+    ).fetchone()
     conn.close()
-    return row["name"] if row else "Missing"
+    if not file_row:
+        raise ValueError("File not found.")
 
-def get_port(message, file_id, command):
-    if message.chat.type != "private" or not _validate_user_file_access(message.from_user.id, int(file_id)):
-        main_bot.reply_to(message, "⛔ Invalid deployment session.")
-        return
-    try:
-        port = int((message.text or "").strip())
-    except Exception:
-        main_bot.reply_to(message, "⚠️ Please enter a valid numeric port between 1024 and 65535.")
-        return
-    if not (1024 <= port <= 65535):
-        main_bot.reply_to(message, "⚠️ Port must be between 1024 and 65535.")
-        return
-    # Create deployment record
-    user = message.from_user
+    command = _infer_start_command(Path(file_row["path"]), file_row["name"])
+    # Validate only the executable/arguments that can be safely validated here.
+    if "$PORT" in command:
+        command = command.replace("$PORT", str(int(os.environ.get("PORT", "8080"))))
+    parts = shlex.split(command)
+    _validate_command(parts)
+
     deploy_id = generate_id("VOLT-DEP")
     conn = get_db()
     c = conn.cursor()
     c.execute(
         "INSERT INTO deployments (id, user_id, file_id, runtime, start_command, port, status) VALUES (?,?,?,?,?,?,?)",
-        (deploy_id, user.id, file_id, "python", command, port, "PENDING_APPROVAL")
+        (deploy_id, user.id, file_id, "auto", command, None, "PENDING_APPROVAL")
     )
     conn.commit()
     conn.close()
-    log_audit(user.id, user.first_name or "User", "DEPLOY_REQUEST", f"Deployment {deploy_id} created")
+    log_audit(user.id, user.first_name or "User", "DEPLOY_REQUEST", f"Deployment {deploy_id} created with auto command")
 
-    # Notify admins
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         types.InlineKeyboardButton("✅ APPROVE", callback_data=f"admin_deploy_approve_{deploy_id}"),
@@ -2505,38 +2671,85 @@ def get_port(message, file_id, command):
         types.InlineKeyboardButton("🔍 DETAILS", callback_data=f"admin_deploy_details_{deploy_id}"),
         types.InlineKeyboardButton("📁 VIEW FILE", callback_data=f"admin_deploy_file_{deploy_id}")
     )
-    username = message.from_user.username or "No Username"
-    admin_text = f"""
-🚀 <b>NEW DEPLOYMENT REQUEST</b>
+    username = user.username or "No Username"
+    admin_text = (
+        "🚀 <b>NEW DEPLOYMENT REQUEST</b>\n\n"
+        f"👤 User: @{html.escape(username)}\n"
+        f"🆔 User ID: <code>{user.id}</code>\n"
+        f"📁 File ID: <code>{file_id}</code>\n"
+        f"📦 File: <code>{html.escape(get_file_name(file_id))}</code>\n"
+        "🤖 Startup: <b>Automatic detection</b>\n"
+        "🟡 Status: <b>PENDING APPROVAL</b>\n"
+        f"🕒 Created: {fmt_ts(datetime.datetime.now(datetime.timezone.utc))}"
+    )
+    for admin_id in (OWNER_ID, CO_OWNER_ID):
+        try:
+            main_bot.send_message(admin_id, admin_text, reply_markup=kb)
+        except Exception:
+            pass
 
-👤 User: @{username}
-🆔 User ID: <code>{message.from_user.id}</code>
-📁 File ID: <code>{file_id}</code>
-📦 File: <code>{get_file_name(file_id)}</code>
-⚙️ Start Command: <code>{command}</code>
-🌐 Port: <b>{port}</b>
-🟡 Status: <b>PENDING APPROVAL</b>
-🕒 Created: {fmt_ts(datetime.datetime.now(datetime.timezone.utc))}
-"""
-    main_bot.send_message(OWNER_ID, admin_text, reply_markup=kb)
-    main_bot.send_message(CO_OWNER_ID, admin_text, reply_markup=kb)
     main_bot.send_message(
-        message.chat.id,
+        user.id,
         f"📁 <b>{html.escape(get_file_name(file_id))}</b>\n\n"
         f"📌 <b>File #{file_id}</b>\n"
         "📊 <b>Status:</b> 🟡 <b>Pending Approval</b>\n"
-        "🖥️ <b>Memory:</b> —\n"
-        "📈 <b>CPU:</b> —\n"
-        "⏱️ <b>Uptime:</b> —\n"
-        "🔄 <b>Restarts:</b> 0\n"
-        f"🌐 <b>Port:</b> {port}\n"
-        f"⚙️ <b>Command:</b> <code>{html.escape(command)}</code>\n\n"
+        "🤖 <b>Startup:</b> ⚡ Automatic detection\n"
         "⏳ <b>Waiting for Owner / Co-Owner approval.</b>",
         reply_markup=types.InlineKeyboardMarkup(row_width=2).add(
             types.InlineKeyboardButton("🔄 REFRESH", callback_data=f"file_open_{file_id}"),
             types.InlineKeyboardButton("⬅️ BACK TO FILES", callback_data="menu_files")
         )
     )
+
+
+def show_deploy(call, file_id=None):
+    user = call.from_user
+    if not is_admin(user.id) and not get_user_plan(user.id):
+        main_bot.edit_message_text(
+            "⚠️ You need an active hosting plan to deploy. Please buy a plan first.",
+            reply_markup=back_main_kb(), chat_id=call.message.chat.id,
+            message_id=call.message.message_id
+        )
+        return
+
+    if not file_id:
+        conn = get_db()
+        files = conn.execute(
+            "SELECT * FROM files WHERE user_id=? ORDER BY uploaded_at DESC", (user.id,)
+        ).fetchall()
+        conn.close()
+        if not files:
+            main_bot.edit_message_text(
+                "📁 No files found. Upload a file first.",
+                reply_markup=back_main_kb(), chat_id=call.message.chat.id,
+                message_id=call.message.message_id
+            )
+            return
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        for f in files:
+            kb.add(types.InlineKeyboardButton(
+                f"📦 {f['name'][:20]}", callback_data=f"deploy_start_{f['id']}"
+            ))
+        kb.add(types.InlineKeyboardButton("◀️ BACK", callback_data="menu_main"))
+        main_bot.edit_message_text(
+            "🚀 <b>SELECT PROJECT</b>\n\nChoose a file. Startup is detected automatically.",
+            reply_markup=kb, chat_id=call.message.chat.id,
+            message_id=call.message.message_id
+        )
+        return
+
+    try:
+        _create_deployment_request(user, int(file_id))
+        main_bot.answer_callback_query(call.id, "⚡ Automatic deployment request created")
+    except Exception as e:
+        main_bot.answer_callback_query(call.id, "❌ Setup failed")
+        main_bot.send_message(
+            call.message.chat.id,
+            f"❌ <b>AUTOMATIC DEPLOYMENT FAILED</b>\n\n<code>{html.escape(str(e)[:900])}</code>",
+            reply_markup=back_main_kb()
+        )
+
+
 
 # ==========================
 #  ADMIN DEPLOYMENT HANDLING
@@ -2605,8 +2818,7 @@ def admin_deploy_callback(call):
 ID: {deploy['id']}
 User: {deploy['user_id']}
 File: {deploy['file_id']}
-Command: {deploy['start_command']}
-Port: {deploy['port']}
+Startup: Automatic
 Status: {deploy['status']}
 Created: {fmt_ts(deploy['created_at'])}
 Approved: {fmt_ts(deploy['approved_at'])}
@@ -2671,7 +2883,7 @@ def _resolve_runtime_command(command_str, sandbox_dir, original_name):
     """Resolve a user command against the files actually present in the sandbox."""
     parts = shlex.split((command_str or "").strip())
     if not parts:
-        raise ValueError("Start command is empty.")
+        raise ValueError("Automatic startup command is unavailable.")
 
     executable = parts[0]
     allowed_binaries = {
@@ -2799,19 +3011,19 @@ def send_v5_file_status(chat_id, user_id, file_id):
             uptime = str(delta).split(".")[0]
         except Exception:
             pass
-    command = dep["start_command"] if dep else "Not deployed yet"
-    port = dep["port"] if dep else "—"
+    command = "Automatic detection"
+    cpu_text, mem_text = get_process_metrics(host["process_id"] if host else None)
+    restarts = int(host["restart_count"] or 0) if host else 0
     text = (
         f"📁 <b>{html.escape(str(file_row['name']))}</b>\n\n"
         f"📌 <b>File #{file_id}</b>\n"
         f"📊 <b>Status:</b> {status_map.get(status, '⚪ ' + status.title())}\n"
         f"📦 <b>Size:</b> {size_mb:.2f} MB\n"
-        "🖥️ <b>Memory:</b> —\n"
-        "📈 <b>CPU:</b> —\n"
+        f"🖥️ <b>Memory:</b> {mem_text}\n"
+        f"📈 <b>CPU:</b> {cpu_text}\n"
         f"⏱️ <b>Uptime:</b> {uptime}\n"
-        "🔄 <b>Restarts:</b> 0\n"
-        f"🌐 <b>Port:</b> {port}\n"
-        f"⚙️ <b>Command:</b> <code>{html.escape(str(command))}</code>\n\n"
+        f"🔄 <b>Restarts:</b> {restarts}\n"
+        "🤖 <b>Startup:</b> ⚡ Automatic\n\n"
         "👇 <b>Choose an action below:</b>"
     )
     main_bot.send_message(chat_id, text, reply_markup=file_detail_kb(file_id, host))
@@ -2836,13 +3048,31 @@ def start_hosting(deploy_id):
         conn.close()
         try:
             main_bot.send_message(deploy["user_id"],
-                                  f"❌ <b>HOSTING FAILED</b>\\n\\nFile record not found for <code>{deploy_id}</code>.")
+                                  f"❌ <b>HOSTING FAILED</b>\n\nFile record not found for <code>{deploy_id}</code>.")
         except Exception:
             pass
         return
 
     file_path = Path(file_row["path"])
     user_id = deploy["user_id"]
+
+    # Startup is ALWAYS automatic. Ignore any legacy value that may still be
+    # stored in the database (for example /start, an emoji, or an old manual
+    # command). This guarantees old deployments cannot execute a Telegram
+    # command as an OS executable.
+    try:
+        stored_command = _infer_start_command(file_path, file_row["name"])
+        if "$PORT" in stored_command:
+            stored_command = stored_command.replace("$PORT", str(int(os.environ.get("PORT", "8080"))))
+        c.execute(
+            "UPDATE deployments SET start_command=?, runtime=? WHERE id=?",
+            (stored_command, "auto", deploy_id),
+        )
+        conn.commit()
+    except Exception as repair_exc:
+        logger.exception("Automatic startup detection failed for %s: %s", deploy_id, repair_exc)
+        stored_command = ""
+
     sandbox_dir = SANDBOX_ROOT / str(user_id) / f"deploy_{deploy_id}"
     shutil.rmtree(sandbox_dir, ignore_errors=True)
     sandbox_dir.mkdir(parents=True, exist_ok=True)
@@ -2856,14 +3086,49 @@ def start_hosting(deploy_id):
         if file_path.suffix.lower() == ".zip":
             _extract_zip_safe(file_path, sandbox_dir)
             original_name = file_path.stem
-            if not (sandbox_dir / deploy["start_command"].split()[-1]).exists():
-                # leave command untouched; user may specify a path inside the ZIP
+            if not (sandbox_dir / stored_command.split()[-1]).exists():
+                # Auto-detected ZIP entry points are validated below.
                 pass
         else:
             shutil.copy2(file_path, sandbox_dir / file_path.name)
             original_name = file_path.name
 
-        parts = _resolve_runtime_command(deploy["start_command"], sandbox_dir, original_name)
+        # Never fall back to the legacy database command; automatic detection is the only source.
+        launch_command = stored_command or _infer_start_command(file_path, file_row["name"])
+
+        # Compile native/source projects automatically before launching them.
+        # Compilation output stays inside the deployment sandbox.
+        ext = file_path.suffix.lower()
+        if ext == ".java":
+            source_name = file_path.name
+            result = subprocess.run(
+                ["javac", source_name], cwd=str(sandbox_dir), env=_sanitize_host_env(),
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, timeout=90, check=False
+            )
+            if result.returncode != 0:
+                raise RuntimeError("Java compilation failed: " + (result.stdout or "")[-1200:])
+        elif ext == ".c":
+            source_name = file_path.name
+            result = subprocess.run(
+                ["gcc", source_name, "-O2", "-o", "volt_app"], cwd=str(sandbox_dir), env=_sanitize_host_env(),
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, timeout=90, check=False
+            )
+            if result.returncode != 0:
+                raise RuntimeError("C compilation failed: " + (result.stdout or "")[-1200:])
+        elif ext == ".cpp":
+            source_name = file_path.name
+            result = subprocess.run(
+                ["g++", source_name, "-O2", "-o", "volt_app"], cwd=str(sandbox_dir), env=_sanitize_host_env(),
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, timeout=90, check=False
+            )
+            if result.returncode != 0:
+                raise RuntimeError("C++ compilation failed: " + (result.stdout or "")[-1200:])
+
+        # Resolve only the automatically generated command.
+        parts = _resolve_runtime_command(launch_command, sandbox_dir, original_name)
 
         env = _sanitize_host_env()
 
@@ -2965,12 +3230,12 @@ def show_my_hosting(call):
             # Get deployment details
             conn2 = get_db()
             c2 = conn2.cursor()
-            c2.execute("SELECT start_command, port FROM deployments WHERE id=?", (h["deployment_id"],))
+            c2.execute("SELECT start_command FROM deployments WHERE id=?", (h["deployment_id"],))
             dep = c2.fetchone()
             conn2.close()
             status_emoji = "🟢" if h["status"] == "ONLINE" else "🔴"
             text += f"{status_emoji} {h['id']} - {dep['start_command'] if dep else 'N/A'}\n"
-            text += f"   Status: {h['status']} | Port: {dep['port'] if dep else 'N/A'}\n"
+            text += f"   Status: {h['status']}\n"
             uptime = "—"
             if h["started_at"]:
                 delta = now_utc() - datetime.datetime.fromisoformat(h["started_at"].replace('Z', '+00:00'))
@@ -3068,7 +3333,7 @@ def host_restart(call, host_id):
 
     conn = get_db()
     conn.execute(
-        "UPDATE hosting SET status='STOPPED', stopped_at=? WHERE id=?",
+        "UPDATE hosting SET status='STOPPED', stopped_at=?, restart_count=restart_count+1 WHERE id=?",
         (now_utc(), host_id)
     )
     conn.execute(
@@ -4033,8 +4298,7 @@ def db_deployment(message):
         f"👤 User: <code>{row['user_id']}</code> @{row['username'] or 'No'}\\n"
         f"📁 File: <code>{row['file_name'] or 'Missing'}</code>\\n"
         f"⚙️ Runtime: <code>{row['runtime']}</code>\\n"
-        f"▶️ Command: <code>{row['start_command']}</code>\\n"
-        f"🌐 Port: <b>{row['port']}</b>\\n"
+        "🤖 Startup: <b>Automatic detection</b>\\n"
         f"📌 Deployment status: <b>{row['status']}</b>\\n"
         f"🖥️ Host: <code>{row['host_id'] or '—'}</code>\\n"
         f"🔢 PID: <code>{row['process_id'] or '—'}</code>\\n"
@@ -4158,8 +4422,10 @@ def shutdown(signum=None, frame=None):
 #  MAIN
 # ==========================
 def main():
-    # Initialize DB
+    # Initialize DB and normalize old manual-start records.
     init_db()
+    sanitize_legacy_start_commands()
+    recover_stale_hosting_records()
 
     if not DB_BOT_TOKEN:
         logger.warning("DB_BOT_TOKEN is not set; DB admin bot will not be started.")
@@ -4195,11 +4461,22 @@ def main():
                 time.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, 60)
 
-    threading.Thread(target=run_bot, args=(main_bot, "MAIN BOT"), daemon=True).start()
-    if DB_BOT_TOKEN:
-        threading.Thread(target=run_bot, args=(db_bot, "DB BOT"), daemon=True).start()
-    if PAY_BOT_TOKEN:
-        threading.Thread(target=run_bot, args=(pay_bot, "PAY BOT"), daemon=True).start()
+    # Do not start two polling workers with the same token. If MAIN/DB/PAY
+    # accidentally share a token, Telegram will return 409 conflicts forever.
+    started_tokens = set()
+    def start_unique(bot, name, token):
+        token = (token or "").strip()
+        if not token:
+            return
+        if token in started_tokens:
+            logger.error("%s not started: duplicate Telegram bot token is already in use by another local worker", name)
+            return
+        started_tokens.add(token)
+        threading.Thread(target=run_bot, args=(bot, name), daemon=True).start()
+
+    start_unique(main_bot, "MAIN BOT", BOT_TOKEN)
+    start_unique(db_bot, "DB BOT", DB_BOT_TOKEN)
+    start_unique(pay_bot, "PAY BOT", PAY_BOT_TOKEN)
 
     logger.info(f"{BRAND} started. Version {BRAND_VER}.")
     logger.info("Owner/Co-Owner admin configuration loaded from Railway Variables (IDs are not logged).")
