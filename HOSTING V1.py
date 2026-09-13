@@ -349,6 +349,29 @@ def init_db():
             key TEXT PRIMARY KEY,
             value TEXT
         );
+        CREATE TABLE IF NOT EXISTS coupons (
+            code TEXT PRIMARY KEY,
+            discount_percent INTEGER NOT NULL DEFAULT 0,
+            max_uses INTEGER NOT NULL DEFAULT 0,
+            used_count INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS referrals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            referrer_id INTEGER NOT NULL,
+            referred_id INTEGER NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'ACTIVE',
+            reward REAL NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS admin_users (
+            user_id INTEGER PRIMARY KEY,
+            role TEXT NOT NULL DEFAULT 'admin',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            added_by INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE TABLE IF NOT EXISTS user_subscriptions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -568,7 +591,15 @@ def update_last_active(user_id):
             conn.close()
 
 def is_admin(user_id):
-    return user_id in (OWNER_ID, CO_OWNER_ID)
+    if user_id in (OWNER_ID, CO_OWNER_ID):
+        return True
+    try:
+        conn=get_db()
+        row=conn.execute("SELECT enabled FROM admin_users WHERE user_id=?", (user_id,)).fetchone()
+        conn.close()
+        return bool(row and row["enabled"])
+    except Exception:
+        return False
 
 def is_banned(user_id):
     conn = get_db()
@@ -704,8 +735,6 @@ def volt_dashboard_markup(uid):
     rows = [
         [volt_button("📤 UPLOAD FILE", "text_upload"),
          volt_button("📁 MY FILES", "menu_files")],
-        [volt_button("🚀 DEPLOYMENT", "menu_deploy"),
-         volt_button("🚀 MY HOSTING", "menu_hosting")],
         [volt_button("📊 ANALYTICS", "menu_stats"),
          volt_button("👤 ACCOUNT", "menu_account")],
         [volt_button("💎 PREMIUM", "menu_buy"),
@@ -744,7 +773,6 @@ def main_menu_kb(user_id=None):
     )
     rows = [
         ("📤 UPLOAD FILE", "📁 MY FILES"),
-        ("🚀 DEPLOYMENT", "🚀 MY HOSTING"),
         ("📊 ANALYTICS", "👤 ACCOUNT"),
         ("💎 PREMIUM", "🎫 SUPPORT"),
         ("ℹ️ ABOUT VOLT", "⚡ BOT SPEED"),
@@ -771,7 +799,6 @@ def files_inline_kb():
     """Inline controls shown after MY SCRIPTS."""
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(types.InlineKeyboardButton("📤 UPLOAD FILE", callback_data="text_upload"))
-    kb.add(types.InlineKeyboardButton("🚀 MY HOSTING", callback_data="menu_hosting"))
     kb.add(types.InlineKeyboardButton("🏠 MAIN MENU", callback_data="menu_main"))
     return kb
 
@@ -958,7 +985,6 @@ def show_my_files_message(message):
             callback_data=f"file_open_{f['id']}"
         ))
     kb.add(types.InlineKeyboardButton("📤 UPLOAD FILE", callback_data="text_upload"))
-    kb.add(types.InlineKeyboardButton("🚀 MY HOSTING", callback_data="menu_hosting"))
     kb.add(types.InlineKeyboardButton("🏠 MAIN MENU", callback_data="menu_main"))
     main_bot.send_message(message.chat.id, text, reply_markup=kb)
 
@@ -1124,10 +1150,14 @@ def handle_document(message: types.Message):
 
     main_bot.reply_to(
         message,
-        f"📁 FILE UPLOADED\n\nProject: {final_path.name}\nSize: {len(downloaded)} bytes\nStatus: 🟢 STORED",
-        reply_markup=types.InlineKeyboardMarkup().add(
-            types.InlineKeyboardButton("🚀 DEPLOY PROJECT", callback_data="menu_deploy"),
-            types.InlineKeyboardButton("📁 MY FILES", callback_data="menu_files")
+        f"📁 <b>FILE UPLOADED</b>\n\n"
+        f"📦 Project: <code>{html.escape(final_path.name)}</code>\n"
+        f"📏 Size: <b>{len(downloaded):,} bytes</b>\n"
+        "🟢 Status: <b>STORED</b>\n\n"
+        "Open <b>📁 MY FILES</b> and select the file to configure/start it.",
+        reply_markup=types.InlineKeyboardMarkup(row_width=2).add(
+            types.InlineKeyboardButton("📁 MY FILES", callback_data="menu_files"),
+            types.InlineKeyboardButton("🏠 MAIN MENU", callback_data="menu_main")
         )
     )
 
@@ -1626,24 +1656,25 @@ def compat_contact(message):
         _send_support_message(message)
 
 def admin_panel_kb():
-    """V5 ULTRA private admin keyboard only. No legacy V12 admin menu."""
+    """V5 ULTRA real admin control center. Every button maps to a backend action."""
     kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton("📊 OVERVIEW", callback_data="admin_refresh"),
-        types.InlineKeyboardButton("👥 USERS", callback_data="admin_users"),
-    )
-    kb.add(
-        types.InlineKeyboardButton("📁 FILES", callback_data="admin_files"),
-        types.InlineKeyboardButton("🚀 DEPLOYMENTS", callback_data="admin_deployments"),
-    )
-    kb.add(
-        types.InlineKeyboardButton("💳 PAYMENTS", callback_data="admin_payments"),
-        types.InlineKeyboardButton("📜 AUDIT LOGS", callback_data="admin_logs"),
-    )
-    kb.add(
-        types.InlineKeyboardButton("🔄 REFRESH", callback_data="admin_refresh"),
-        types.InlineKeyboardButton("🏠 MAIN MENU", callback_data="menu_main"),
-    )
+    rows = [
+        (("⏳ PENDING", "admin_pending"), ("🤖 DEPLOYMENTS", "admin_deployments")),
+        (("👥 USERS", "admin_users"), ("💳 PAYMENTS", "admin_payments")),
+        (("🎟️ COUPONS", "admin_coupons"), ("💎 PREMIUM", "admin_premium")),
+        (("🎁 REFERRALS", "admin_referrals"), ("🛡️ SECURITY", "admin_security")),
+        (("📊 STATISTICS", "admin_statistics"), ("🩺 HEALTH", "admin_health")),
+        (("📜 AUDIT LOGS", "admin_logs"), ("💾 BACKUPS", "admin_backups")),
+        (("⚙️ SETTINGS", "admin_settings"), ("👑 ADMIN PERMS", "admin_perms")),
+        (("🖥️ SERVER", "admin_server"), ("🖼️ BRANDING", "admin_branding")),
+    ]
+    for left, right in rows:
+        kb.row(types.InlineKeyboardButton(left[0], callback_data=left[1]),
+               types.InlineKeyboardButton(right[0], callback_data=right[1]))
+    kb.row(types.InlineKeyboardButton("📄 EXPORT USERS", callback_data="admin_export_users"))
+    kb.row(types.InlineKeyboardButton("➕ ADD ADMIN", callback_data="admin_add_admin"))
+    kb.row(types.InlineKeyboardButton("🔄 REFRESH", callback_data="admin_refresh"),
+           types.InlineKeyboardButton("🏠 MAIN MENU", callback_data="menu_main"))
     return kb
 
 def _admin_display_name(username, fallback):
@@ -1666,6 +1697,115 @@ def _admin_panel_text(users, online, pending_deployments, pending_payments):
         "Owner &amp; Co-Owner only · ID authorized\n\n"
         "⚡ <b>V5 ULTRA</b> · Clean control interface"
     )
+
+def _admin_nav_kb(refresh_cb):
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.row(types.InlineKeyboardButton("🔄 REFRESH", callback_data=refresh_cb),
+           types.InlineKeyboardButton("🔙 BACK", callback_data="admin_dashboard"))
+    kb.row(types.InlineKeyboardButton("🏠 MAIN", callback_data="menu_main"))
+    return kb
+
+def _admin_simple_page(call, title, body, refresh_cb):
+    main_bot.answer_callback_query(call.id)
+    main_bot.edit_message_text(f"{title}\n\n{body}", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="HTML", reply_markup=_admin_nav_kb(refresh_cb))
+
+def _admin_count(conn, sql, args=()):
+    return conn.execute(sql, args).fetchone()[0]
+
+def admin_pending_page(call):
+    conn=get_db()
+    try:
+        pd=_admin_count(conn,"SELECT COUNT(*) FROM deployments WHERE status='PENDING_APPROVAL'")
+        pp=_admin_count(conn,"SELECT COUNT(*) FROM payments WHERE status='PENDING'")
+    finally: conn.close()
+    _admin_simple_page(call,"⏳ <b>PENDING QUEUE</b>",f"🚀 Deployments pending: <b>{pd}</b>\n💳 Payments pending: <b>{pp}</b>","admin_pending")
+
+def admin_statistics_page(call):
+    conn=get_db()
+    try:
+        vals={
+          'Users':_admin_count(conn,'SELECT COUNT(*) FROM users'),
+          'Files':_admin_count(conn,'SELECT COUNT(*) FROM files'),
+          'Deployments':_admin_count(conn,'SELECT COUNT(*) FROM deployments'),
+          'Online':_admin_count(conn,"SELECT COUNT(*) FROM hosting WHERE status='ONLINE'"),
+          'Premium':_admin_count(conn,"SELECT COUNT(*) FROM users WHERE is_premium=1"),
+          'Payments':_admin_count(conn,'SELECT COUNT(*) FROM payments'),
+        }
+    finally: conn.close()
+    _admin_simple_page(call,"📊 <b>STATISTICS</b>","\n".join(f"{k}: <b>{v}</b>" for k,v in vals.items()),"admin_statistics")
+
+def admin_health_page(call):
+    conn=get_db()
+    try: conn.execute('SELECT 1'); db='🟢 ONLINE'
+    except Exception: db='🔴 ERROR'
+    finally: conn.close()
+    import shutil as _shutil
+    total,used,free=_shutil.disk_usage(SANDBOX_ROOT)
+    _admin_simple_page(call,"🩺 <b>SYSTEM HEALTH</b>",f"Telegram Bot: 🟢\nDatabase: {db}\nDisk Free: <b>{free/1024**3:.2f} GB</b>\nSandbox: <code>{html.escape(str(SANDBOX_ROOT))}</code>","admin_health")
+
+def admin_server_page(call):
+    try:
+        import shutil as _shutil
+        total,used,free=_shutil.disk_usage(SANDBOX_ROOT)
+        body=f"Sandbox: <code>{html.escape(str(SANDBOX_ROOT))}</code>\nDisk: <b>{used/1024**3:.2f} / {total/1024**3:.2f} GB</b>\nFree: <b>{free/1024**3:.2f} GB</b>\nPython: <code>{html.escape(sys.version.split()[0])}</code>"
+    except Exception as exc: body=f"Server metrics unavailable: <code>{html.escape(str(exc))}</code>"
+    _admin_simple_page(call,"🖥️ <b>SERVER</b>",body,"admin_server")
+
+def admin_security_page(call):
+    conn=get_db()
+    try: logs=_admin_count(conn,"SELECT COUNT(*) FROM audit_logs WHERE action LIKE '%SECURITY%' OR action LIKE '%REJECT%'")
+    finally: conn.close()
+    _admin_simple_page(call,"🛡️ <b>SECURITY</b>",f"Security/rejection audit events: <b>{logs}</b>\n\nControl-plane secrets are not passed to hosted user processes.","admin_security")
+
+def admin_premium_page(call):
+    conn=get_db()
+    try: active=_admin_count(conn,"SELECT COUNT(*) FROM user_subscriptions WHERE status='ACTIVE'"); plans=conn.execute('SELECT name,price,duration_days FROM plans ORDER BY duration_days').fetchall()
+    finally: conn.close()
+    body=f"Active subscriptions: <b>{active}</b>\n\n"+"\n".join(f"💎 {html.escape(str(r['name']))}: ₹{r['price']} / {r['duration_days']} days" for r in plans)
+    _admin_simple_page(call,"💎 <b>PREMIUM</b>",body,"admin_premium")
+
+def admin_coupons_page(call):
+    conn=get_db()
+    try: rows=conn.execute('SELECT code,discount_percent,max_uses,used_count,enabled FROM coupons ORDER BY created_at DESC LIMIT 20').fetchall()
+    finally: conn.close()
+    body=("No coupons created yet." if not rows else "\n".join(f"🎟️ <code>{html.escape(str(r['code']))}</code> — {r['discount_percent']}% · {r['used_count']}/{r['max_uses'] or '∞'} · {'ON' if r['enabled'] else 'OFF'}" for r in rows))
+    body += "\n\nUse /addcoupon CODE PERCENT MAX_USES to create one."
+    _admin_simple_page(call,"🎟️ <b>COUPONS</b>",body,"admin_coupons")
+
+def admin_referrals_page(call):
+    conn=get_db()
+    try: total=_admin_count(conn,'SELECT COUNT(*) FROM referrals'); rewards=conn.execute('SELECT COALESCE(SUM(reward),0) FROM referrals').fetchone()[0]
+    finally: conn.close()
+    _admin_simple_page(call,"🎁 <b>REFERRALS</b>",f"Referral records: <b>{total}</b>\nRewards recorded: <b>₹{float(rewards):.2f}</b>","admin_referrals")
+
+def admin_settings_page(call):
+    conn=get_db()
+    try: rows=conn.execute('SELECT key,value FROM settings ORDER BY key').fetchall()
+    finally: conn.close()
+    body='\n'.join(f"⚙️ <code>{html.escape(str(r['key']))}</code> = <code>{html.escape(str(r['value']))}</code>" for r in rows) or 'No custom settings stored.'
+    _admin_simple_page(call,"⚙️ <b>SETTINGS</b>",body,"admin_settings")
+
+def admin_perms_page(call):
+    conn=get_db()
+    try: rows=conn.execute('SELECT user_id,role,enabled FROM admin_users ORDER BY created_at').fetchall()
+    finally: conn.close()
+    body='\n'.join(f"👑 <code>{r['user_id']}</code> — {html.escape(str(r['role']))} — {'ON' if r['enabled'] else 'OFF'}" for r in rows) or 'Owner/Co-Owner are configured through secure environment variables.'
+    body += "\n\nUse /addadmin TELEGRAM_ID to add an admin."
+    _admin_simple_page(call,"👑 <b>ADMIN PERMISSIONS</b>",body,"admin_perms")
+
+def admin_backups_page(call):
+    backup_dir=Path(os.environ.get('BACKUP_DIR','/data/backups' if Path('/data').exists() else './backups'))
+    backup_dir.mkdir(parents=True,exist_ok=True)
+    files=sorted(backup_dir.glob('*.db'), key=lambda x:x.stat().st_mtime, reverse=True)[:10]
+    body='\n'.join(f"💾 {html.escape(f.name)} — {f.stat().st_size/1024:.1f} KB" for f in files) or 'No database backups yet.'
+    body += "\n\nOwner/Co-Owner can create a fresh backup with the button below."
+    kb=_admin_nav_kb('admin_backups')
+    kb.row(types.InlineKeyboardButton('💾 CREATE BACKUP',callback_data='admin_create_backup'))
+    main_bot.answer_callback_query(call.id)
+    main_bot.edit_message_text('💾 <b>BACKUPS</b>\n\n'+body,chat_id=call.message.chat.id,message_id=call.message.message_id,parse_mode='HTML',reply_markup=kb)
+
+def admin_branding_page(call):
+    _admin_simple_page(call,'🖼️ <b>BRANDING</b>',f'Brand: <b>{html.escape(BRAND)}</b>\nVersion: <b>V5 ULTRA</b>\nUI: <b>2-column Admin Control Center</b>', 'admin_branding')
 
 def show_admin_panel(message_or_call):
     user = message_or_call.from_user
@@ -1972,6 +2112,84 @@ def main_callback(call):
                 reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ BACK", callback_data="admin_dashboard")),
             )
 
+        elif data == "admin_pending":
+            if not is_admin(user.id): main_bot.answer_callback_query(call.id,"⛔ Unauthorized"); return
+            admin_pending_page(call)
+
+        elif data == "admin_statistics":
+            if not is_admin(user.id): main_bot.answer_callback_query(call.id,"⛔ Unauthorized"); return
+            admin_statistics_page(call)
+
+        elif data == "admin_health":
+            if not is_admin(user.id): main_bot.answer_callback_query(call.id,"⛔ Unauthorized"); return
+            admin_health_page(call)
+
+        elif data == "admin_server":
+            if not is_admin(user.id): main_bot.answer_callback_query(call.id,"⛔ Unauthorized"); return
+            admin_server_page(call)
+
+        elif data == "admin_security":
+            if not is_admin(user.id): main_bot.answer_callback_query(call.id,"⛔ Unauthorized"); return
+            admin_security_page(call)
+
+        elif data == "admin_premium":
+            if not is_admin(user.id): main_bot.answer_callback_query(call.id,"⛔ Unauthorized"); return
+            admin_premium_page(call)
+
+        elif data == "admin_coupons":
+            if not is_admin(user.id): main_bot.answer_callback_query(call.id,"⛔ Unauthorized"); return
+            admin_coupons_page(call)
+
+        elif data == "admin_referrals":
+            if not is_admin(user.id): main_bot.answer_callback_query(call.id,"⛔ Unauthorized"); return
+            admin_referrals_page(call)
+
+        elif data == "admin_settings":
+            if not is_admin(user.id): main_bot.answer_callback_query(call.id,"⛔ Unauthorized"); return
+            admin_settings_page(call)
+
+        elif data == "admin_perms":
+            if not is_admin(user.id): main_bot.answer_callback_query(call.id,"⛔ Unauthorized"); return
+            admin_perms_page(call)
+
+        elif data == "admin_backups":
+            if not is_admin(user.id): main_bot.answer_callback_query(call.id,"⛔ Unauthorized"); return
+            admin_backups_page(call)
+
+        elif data == "admin_branding":
+            if not is_admin(user.id): main_bot.answer_callback_query(call.id,"⛔ Unauthorized"); return
+            admin_branding_page(call)
+
+        elif data == "admin_create_backup":
+            if not is_admin(user.id): main_bot.answer_callback_query(call.id,"⛔ Unauthorized"); return
+            try:
+                import shutil as _shutil
+                backup_dir=Path(os.environ.get('BACKUP_DIR','/data/backups' if Path('/data').exists() else './backups')); backup_dir.mkdir(parents=True,exist_ok=True)
+                target=backup_dir/f"volt_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}.db"
+                conn=get_db(); conn.commit(); _shutil.copy2(DB_PATH,target); conn.close()
+                log_audit(user.id, user.first_name or 'Admin', 'BACKUP_CREATED', str(target))
+                main_bot.answer_callback_query(call.id,'💾 Backup created')
+                admin_backups_page(call)
+            except Exception as exc:
+                logger.exception('backup failed'); main_bot.answer_callback_query(call.id,'❌ Backup failed',show_alert=True)
+
+        elif data == "admin_export_users":
+            if not is_admin(user.id): main_bot.answer_callback_query(call.id,"⛔ Unauthorized"); return
+            conn=get_db()
+            try: rows=conn.execute('SELECT id,username,first_name,is_premium,banned FROM users ORDER BY id').fetchall()
+            finally: conn.close()
+            export_path=Path('/tmp')/f"volt_users_{user.id}.csv"
+            import csv as _csv
+            with open(export_path,'w',newline='',encoding='utf-8') as fh:
+                w=_csv.writer(fh); w.writerow(['id','username','first_name','is_premium','banned']); w.writerows(rows)
+            with open(export_path,'rb') as fh: main_bot.send_document(call.message.chat.id,fh,caption='📄 VOLT USERS EXPORT')
+            main_bot.answer_callback_query(call.id,'📄 Export sent')
+
+        elif data == "admin_add_admin":
+            if not is_admin(user.id): main_bot.answer_callback_query(call.id,"⛔ Unauthorized"); return
+            main_bot.answer_callback_query(call.id)
+            main_bot.send_message(call.message.chat.id,'➕ <b>ADD ADMIN</b>\n\nSend <code>/addadmin TELEGRAM_ID</code>.')
+
         elif data == "admin_logs":
             if not is_admin(user.id):
                 main_bot.answer_callback_query(call.id, "⛔ Unauthorized")
@@ -2120,10 +2338,7 @@ def show_my_files(call):
         kb = types.InlineKeyboardMarkup(row_width=1)
         for f in files:
             text += f"📦 {f['name']} ({f['size']} bytes)\n"
-            kb.add(
-                types.InlineKeyboardButton(f"🚀 DEPLOY - {f['name'][:20]}", callback_data=f"deploy_start_{f['id']}"),
-                types.InlineKeyboardButton(f"🗑️ DELETE - {f['name'][:20]}", callback_data=f"file_delete_{f['id']}")
-            )
+            kb.add(types.InlineKeyboardButton(f"📁 {f['name'][:32]}", callback_data=f"file_open_{f['id']}"))
         kb.add(types.InlineKeyboardButton("◀️ BACK", callback_data="menu_main"))
 
     main_bot.edit_message_text(text, reply_markup=kb,
@@ -2195,9 +2410,32 @@ def show_deploy(call, file_id=None):
         main_bot.edit_message_text("Select a file to deploy:", reply_markup=kb,
                                    chat_id=call.message.chat.id, message_id=call.message.message_id)
     else:
-        # Ask for start command
-        main_bot.edit_message_text("⚙️ Enter the start command for your project (e.g., python3 bot.py):",
-                                   chat_id=call.message.chat.id, message_id=call.message.message_id)
+        conn = get_db()
+        file_row = conn.execute(
+            "SELECT name, size FROM files WHERE id=? AND user_id=?", (file_id, user.id)
+        ).fetchone()
+        conn.close()
+        filename = file_row["name"] if file_row else "Project"
+        size = int(file_row["size"] or 0) if file_row else 0
+        setup_text = (
+            f"📁 <b>{html.escape(str(filename))}</b>\n\n"
+            f"📌 <b>File #{file_id}</b>\n"
+            "📊 <b>Status:</b> ⚪ <b>Stopped</b>\n"
+            f"📦 <b>Size:</b> {size / (1024 * 1024):.2f} MB\n"
+            "🖥️ <b>Memory:</b> —\n"
+            "📈 <b>CPU:</b> —\n"
+            "⏱️ <b>Uptime:</b> —\n"
+            "🔄 <b>Restarts:</b> 0\n\n"
+            "⚙️ <b>DEPLOYMENT SETUP</b>\n"
+            "Enter the start command for your project\n"
+            "<i>Example: python3 bot.py</i>"
+        )
+        main_bot.edit_message_text(
+            setup_text, chat_id=call.message.chat.id, message_id=call.message.message_id,
+            reply_markup=types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton("⬅️ BACK TO FILES", callback_data="menu_files")
+            )
+        )
         main_bot.register_next_step_handler(call.message, get_start_command, file_id)
 
 def get_start_command(message, file_id):
@@ -2217,7 +2455,11 @@ def get_start_command(message, file_id):
     except Exception:
         main_bot.reply_to(message, "⚠️ Unsafe or invalid command.")
         return
-    main_bot.send_message(message.chat.id, "🌐 Enter the port (1024–65535):")
+    main_bot.send_message(
+        message.chat.id,
+        "🌐 <b>NETWORK CONFIGURATION</b>\n\n"
+        "Enter the port for this project <b>(1024–65535)</b>."
+    )
     main_bot.register_next_step_handler(message, get_port, file_id, command)
 
 def get_file_name(file_id):
@@ -2278,15 +2520,23 @@ def get_port(message, file_id, command):
 """
     main_bot.send_message(OWNER_ID, admin_text, reply_markup=kb)
     main_bot.send_message(CO_OWNER_ID, admin_text, reply_markup=kb)
-    main_bot.send_message(message.chat.id, f"""
-🚀 DEPLOYMENT REQUEST CREATED
-
-Your deployment has been submitted to {BRAND} administration.
-
-Status: 🟡 WAITING FOR APPROVAL
-
-Your hosting will NOT start until the request is approved.
-""", reply_markup=back_main_kb())
+    main_bot.send_message(
+        message.chat.id,
+        f"📁 <b>{html.escape(get_file_name(file_id))}</b>\n\n"
+        f"📌 <b>File #{file_id}</b>\n"
+        "📊 <b>Status:</b> 🟡 <b>Pending Approval</b>\n"
+        "🖥️ <b>Memory:</b> —\n"
+        "📈 <b>CPU:</b> —\n"
+        "⏱️ <b>Uptime:</b> —\n"
+        "🔄 <b>Restarts:</b> 0\n"
+        f"🌐 <b>Port:</b> {port}\n"
+        f"⚙️ <b>Command:</b> <code>{html.escape(command)}</code>\n\n"
+        "⏳ <b>Waiting for Owner / Co-Owner approval.</b>",
+        reply_markup=types.InlineKeyboardMarkup(row_width=2).add(
+            types.InlineKeyboardButton("🔄 REFRESH", callback_data=f"file_open_{file_id}"),
+            types.InlineKeyboardButton("⬅️ BACK TO FILES", callback_data="menu_files")
+        )
+    )
 
 # ==========================
 #  ADMIN DEPLOYMENT HANDLING
@@ -2513,6 +2763,60 @@ def _extract_zip_safe(zip_path, destination):
                 raise ValueError("Unsafe ZIP path detected.")
         zf.extractall(destination)
 
+def send_v5_file_status(chat_id, user_id, file_id):
+    """Render the screenshot-style V5 ULTRA per-file deployment status card."""
+    conn = get_db()
+    file_row = conn.execute(
+        "SELECT * FROM files WHERE id=? AND user_id=?", (file_id, user_id)
+    ).fetchone()
+    host = conn.execute(
+        "SELECT * FROM hosting WHERE user_id=? AND deployment_id IN "
+        "(SELECT id FROM deployments WHERE file_id=? AND user_id=?) "
+        "ORDER BY started_at DESC LIMIT 1", (user_id, file_id, user_id)
+    ).fetchone()
+    dep = None
+    if host:
+        dep = conn.execute("SELECT * FROM deployments WHERE id=?", (host["deployment_id"],)).fetchone()
+    else:
+        dep = conn.execute(
+            "SELECT * FROM deployments WHERE file_id=? AND user_id=? ORDER BY created_at DESC LIMIT 1",
+            (file_id, user_id)
+        ).fetchone()
+    conn.close()
+    if not file_row:
+        return
+    status = str(host["status"] if host else (dep["status"] if dep else "STOPPED")).upper()
+    status_map = {
+        "ONLINE": "🟢 Online", "STOPPED": "⚪ Stopped", "CRASHED": "🔴 Crashed",
+        "PENDING_APPROVAL": "🟡 Pending Approval", "APPROVED": "🟡 Approved",
+        "FAILED": "🔴 Failed", "REJECTED": "🔴 Rejected",
+    }
+    size_mb = int(file_row["size"] or 0) / (1024 * 1024)
+    uptime = "—"
+    if host and host["started_at"] and status == "ONLINE":
+        try:
+            delta = now_utc() - datetime.datetime.fromisoformat(str(host["started_at"]).replace("Z", "+00:00"))
+            uptime = str(delta).split(".")[0]
+        except Exception:
+            pass
+    command = dep["start_command"] if dep else "Not deployed yet"
+    port = dep["port"] if dep else "—"
+    text = (
+        f"📁 <b>{html.escape(str(file_row['name']))}</b>\n\n"
+        f"📌 <b>File #{file_id}</b>\n"
+        f"📊 <b>Status:</b> {status_map.get(status, '⚪ ' + status.title())}\n"
+        f"📦 <b>Size:</b> {size_mb:.2f} MB\n"
+        "🖥️ <b>Memory:</b> —\n"
+        "📈 <b>CPU:</b> —\n"
+        f"⏱️ <b>Uptime:</b> {uptime}\n"
+        "🔄 <b>Restarts:</b> 0\n"
+        f"🌐 <b>Port:</b> {port}\n"
+        f"⚙️ <b>Command:</b> <code>{html.escape(str(command))}</code>\n\n"
+        "👇 <b>Choose an action below:</b>"
+    )
+    main_bot.send_message(chat_id, text, reply_markup=file_detail_kb(file_id, host))
+
+
 def start_hosting(deploy_id):
     conn = get_db()
     c = conn.cursor()
@@ -2579,8 +2883,6 @@ def start_hosting(deploy_id):
             env=env,
             shell=False,
             start_new_session=(os.name == "posix"),
-            # Railway/container-safe: do not use preexec_fn (can raise SubprocessError).
-            preexec_fn=None,
             bufsize=1,
             close_fds=True,
         )
@@ -2615,15 +2917,7 @@ def start_hosting(deploy_id):
 
         log_audit(0, "System", "HOSTING_START",
                   f"Hosting {host_id} started for deployment {deploy_id}")
-        main_bot.send_message(
-            user_id,
-            f"🟢 <b>HOSTING ONLINE</b>\\n\\n"
-            f"Project: <code>{deploy_id}</code>\\n"
-            f"Host ID: <code>{host_id}</code>\\n"
-            f"Status: <b>ONLINE</b>\\n"
-            f"Port: <b>{deploy['port']}</b>\\n"
-            f"Command: <code>{deploy['start_command']}</code>"
-        )
+        send_v5_file_status(user_id, user_id, int(deploy["file_id"]))
 
     except Exception as e:
         logger.exception("Hosting start failed for %s", deploy_id)
@@ -3929,6 +4223,24 @@ def harden_runtime_directories():
             os.chmod(dbp, 0o600)
     except Exception:
         pass
+
+@main_bot.message_handler(commands=['addadmin'])
+def command_addadmin(message):
+    if not is_admin(message.from_user.id):
+        main_bot.reply_to(message, '⛔ Admin only.')
+        return
+    parts=(message.text or '').split()
+    if len(parts)!=2 or not parts[1].isdigit():
+        main_bot.reply_to(message, 'Usage: <code>/addadmin TELEGRAM_ID</code>', parse_mode='HTML')
+        return
+    target=int(parts[1])
+    conn=get_db()
+    try:
+        conn.execute('INSERT OR REPLACE INTO admin_users(user_id,role,enabled,added_by) VALUES(?,?,1,?)',(target,'admin',message.from_user.id))
+        conn.commit()
+    finally: conn.close()
+    log_audit(message.from_user.id, message.from_user.first_name or 'Admin', 'ADMIN_ADD', str(target))
+    main_bot.reply_to(message, f'✅ Admin <code>{target}</code> added.', parse_mode='HTML')
 
 if __name__ == "__main__":
     harden_runtime_directories()
