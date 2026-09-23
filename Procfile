@@ -1,1 +1,1 @@
-worker: python "HOSTING V1.py"
+worker: python voltspamhoster_23_best.py
